@@ -218,8 +218,8 @@ Alternatively, restart `dpanel-server` after updating `INITIAL_ADMIN_PASSWORD` i
 **DEV SEC IT** is a specialized cybersecurity and enterprise software engineering collective dedicated to building hardened, scalable, and developer-centric infrastructure solutions.
 
 - **Website**: [https://devsecit.com](https://devsecit.com)
-- **GitHub**: [https://github.com/devsecit](https://github.com/devsecit)
-- **Community & Support**: [devsecit.com/contact](https://devsecit.com/contact)
+- **GitHub**: [https://github.com/devsecit](https://github.com/dev-sec-it)
+- **Community & Support**: [https://github.com/dev-sec-it/dPanel/issues](https://github.com/dev-sec-it/dPanel/issues)
 
 ---
 

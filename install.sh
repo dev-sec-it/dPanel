@@ -113,7 +113,7 @@ esac
 # ------------------------------------------------------------------------------
 # 4. Install Minimal Lightweight Runtime Dependencies (< 30s)
 # ------------------------------------------------------------------------------
-log_info "Installing runtime prerequisites..."
+log_info "Installing runtime prerequisites & web stack..."
 
 if [ "$PKG_MANAGER" = "apt" ]; then
     apt-get update -y -q
@@ -121,6 +121,14 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         postgresql \
         postgresql-contrib \
         libpq5 \
+        nginx \
+        php-fpm \
+        php-mysql \
+        php-mbstring \
+        php-zip \
+        php-gd \
+        php-curl \
+        php-xml \
         openssl \
         curl \
         ca-certificates \
@@ -134,6 +142,14 @@ elif [ "$PKG_MANAGER" = "apk" ]; then
         postgresql16 \
         postgresql16-contrib \
         libpq \
+        nginx \
+        php83-fpm \
+        php83-mysqli \
+        php83-mbstring \
+        php83-zip \
+        php83-gd \
+        php83-curl \
+        php83-xml \
         openssl \
         curl \
         ca-certificates \
@@ -158,12 +174,16 @@ mkdir -p /var/dpanel/tools
 mkdir -p /var/log/dpanel
 mkdir -p /etc/dpanel
 mkdir -p /run/dpanel
+mkdir -p /var/www/phpmyadmin
+mkdir -p /var/www/phpmyadmin/tmp
+mkdir -p /etc/nginx/conf.d
 
 chmod 755 /var/dpanel
 chmod 750 /var/dpanel/backups
 chmod 777 /var/dpanel/ipc
 chmod 755 /run/dpanel
 chmod 700 /etc/dpanel
+chmod 777 /var/www/phpmyadmin/tmp
 
 # ------------------------------------------------------------------------------
 # 6. Deploy Pre-built Binaries (Instant Copy)
@@ -266,7 +286,79 @@ su - postgres -s /bin/sh -c "${PG_BIN:+$PG_BIN/}psql -d dpanel_db -c 'ALTER DEFA
 log_info "Database setup completed."
 
 # ------------------------------------------------------------------------------
-# 8. Generate Super Admin Credentials & Environment Configuration
+# 8. phpMyAdmin & Nginx Port 888 Setup
+# ------------------------------------------------------------------------------
+log_info "Setting up phpMyAdmin on Port 888..."
+
+if [ ! -f "/var/www/phpmyadmin/index.php" ]; then
+    curl -sSL https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.tar.gz -o /tmp/pma.tar.gz 2>/dev/null || true
+    if [ -f /tmp/pma.tar.gz ]; then
+        tar -xzf /tmp/pma.tar.gz --strip-components=1 -C /var/www/phpmyadmin
+        rm -f /tmp/pma.tar.gz
+    fi
+fi
+
+cat > /var/www/phpmyadmin/config.inc.php <<'PMAEOF'
+<?php
+declare(strict_types=1);
+$cfg['blowfish_secret'] = 'dpanel_secure_blowfish_key_32_chars_ok!';
+$i = 0;
+$i++;
+$cfg['Servers'][$i]['auth_type'] = 'cookie';
+$cfg['Servers'][$i]['host'] = '127.0.0.1';
+$cfg['Servers'][$i]['port'] = '3306';
+$cfg['Servers'][$i]['compress'] = false;
+$cfg['Servers'][$i]['AllowNoPassword'] = true;
+$cfg['UploadDir'] = '';
+$cfg['SaveDir'] = '';
+$cfg['TempDir'] = '/var/www/phpmyadmin/tmp';
+PMAEOF
+
+PHP_SOCK=""
+for s in /run/php/php8.5-fpm.sock /run/php/php8.4-fpm.sock /run/php/php8.3-fpm.sock /run/php/php8.2-fpm.sock /run/php/php-fpm.sock; do
+    if [ -S "$s" ]; then
+        PHP_SOCK="$s"
+        break
+    fi
+done
+[ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php8.3-fpm.sock"
+
+cat > /etc/nginx/conf.d/phpmyadmin.conf <<NGINXCONF
+server {
+    listen 888 default_server;
+    listen [::]:888 default_server;
+    server_name _;
+    root /var/www/phpmyadmin;
+    index index.php index.html;
+
+    client_max_body_size 256M;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$args;
+    }
+
+    location ~ \.php$ {
+        include fastcgi_params;
+        fastcgi_pass unix:${PHP_SOCK};
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param PATH_INFO \$fastcgi_path_info;
+        fastcgi_read_timeout 300;
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+}
+NGINXCONF
+
+chown -R www-data:www-data /var/www/phpmyadmin 2>/dev/null || true
+if command -v systemctl &>/dev/null; then
+    systemctl restart nginx 2>/dev/null || true
+fi
+
+# ------------------------------------------------------------------------------
+# 9. Generate Super Admin Credentials & Environment Configuration
 # ------------------------------------------------------------------------------
 log_info "Configuring environment and credentials..."
 
@@ -292,7 +384,7 @@ ENVEOF
 chmod 600 /etc/dpanel/.env
 
 # ------------------------------------------------------------------------------
-# 9. Filebrowser Installation
+# 10. Filebrowser Installation
 # ------------------------------------------------------------------------------
 log_info "Installing Filebrowser web file manager..."
 
@@ -335,7 +427,7 @@ FBCONF
 fi
 
 # ------------------------------------------------------------------------------
-# 10. Configure System Services (systemd / OpenRC)
+# 11. Configure System Services (systemd / OpenRC)
 # ------------------------------------------------------------------------------
 log_info "Registering dPanel system services..."
 
@@ -399,7 +491,7 @@ SERVICEEOF
     fi
 
     systemctl daemon-reload
-    systemctl enable dpaneld dpanel-server filebrowser 2>/dev/null || true
+    systemctl enable dpaneld dpanel-server filebrowser nginx 2>/dev/null || true
     systemctl restart dpaneld
     sleep 1
     systemctl restart dpanel-server
@@ -441,7 +533,7 @@ RCEOF
 fi
 
 # ------------------------------------------------------------------------------
-# 11. Health Verification & Service Assertion
+# 12. Health Verification & Service Assertion
 # ------------------------------------------------------------------------------
 log_info "Verifying dPanel service health..."
 sleep 2
@@ -462,7 +554,7 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# 12. Display Access Credentials & Installation Summary
+# 13. Display Access Credentials & Installation Summary
 # ------------------------------------------------------------------------------
 SERVER_IP=$(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1 || echo "YOUR_SERVER_IP")
 
@@ -472,6 +564,7 @@ echo -e "${GREEN}   dPanel Enterprise Installation Completed Successfully!      
 echo -e "${GREEN}==================================================================${NC}"
 echo ""
 echo -e "  Panel URL:        ${BLUE}http://${SERVER_IP}:2083${NC}"
+echo -e "  phpMyAdmin:       ${BLUE}http://${SERVER_IP}:888${NC}"
 echo -e "  Username:         ${YELLOW}superadmin${NC}"
 echo -e "  Password:         ${YELLOW}${ADMIN_PASS}${NC}"
 echo ""

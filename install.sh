@@ -116,8 +116,20 @@ esac
 log_info "Installing runtime prerequisites & web stack..."
 
 if [ "$PKG_MANAGER" = "apt" ]; then
+    # Fix Debian/Ubuntu 24.04 mariadb-common update-alternatives bug
+    mkdir -p /etc/mysql/conf.d /etc/mysql/mariadb.conf.d
+    if [ ! -f /etc/mysql/mariadb.cnf ]; then
+        cat << 'EOF' > /etc/mysql/mariadb.cnf
+# The MariaDB configuration file
+!includedir /etc/mysql/conf.d/
+!includedir /etc/mysql/mariadb.conf.d/
+EOF
+    fi
+    chmod 644 /etc/mysql/mariadb.cnf
+    dpkg --configure -a 2>/dev/null || true
+
     apt-get update -y -q
-    apt-get install -y --no-install-recommends \
+    if ! apt-get install -y --no-install-recommends \
         postgresql \
         postgresql-contrib \
         libpq5 \
@@ -137,7 +149,34 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         tar \
         gzip \
         bash \
-        procps
+        procps; then
+        log_warn "Fixing dpkg package dependencies and retrying..."
+        touch /etc/mysql/mariadb.cnf
+        chmod 644 /etc/mysql/mariadb.cnf
+        dpkg --configure -a || true
+        apt-get install -f -y
+        apt-get install -y --no-install-recommends \
+            postgresql \
+            postgresql-contrib \
+            libpq5 \
+            mariadb-server \
+            mariadb-client \
+            nginx \
+            php-fpm \
+            php-mysql \
+            php-mbstring \
+            php-zip \
+            php-gd \
+            php-curl \
+            php-xml \
+            openssl \
+            curl \
+            ca-certificates \
+            tar \
+            gzip \
+            bash \
+            procps
+    fi
 elif [ "$PKG_MANAGER" = "apk" ]; then
     apk update -q
     apk add --no-cache \

@@ -114,7 +114,25 @@ esac
 log_info "Installing runtime prerequisites & web stack..."
 
 if [ "$PKG_MANAGER" = "apt" ]; then
-    # Fix Debian/Ubuntu 24.04 mariadb-common update-alternatives bug
+    # Fix arm64 repository architecture mismatch (archive.ubuntu.com does not support arm64, only ports.ubuntu.com)
+    if [ "$(uname -m)" = "aarch64" ] || [ "$(uname -m)" = "arm64" ]; then
+        if [ -f /etc/apt/sources.list ]; then
+            sed -i 's|http://archive.ubuntu.com/ubuntu|http://ports.ubuntu.com/ubuntu-ports|g' /etc/apt/sources.list 2>/dev/null || true
+            sed -i 's|http://security.ubuntu.com/ubuntu|http://ports.ubuntu.com/ubuntu-ports|g' /etc/apt/sources.list 2>/dev/null || true
+        fi
+        if [ -d /etc/apt/sources.list.d ]; then
+            sed -i 's|http://archive.ubuntu.com/ubuntu|http://ports.ubuntu.com/ubuntu-ports|g' /etc/apt/sources.list.d/*.list 2>/dev/null || true
+            sed -i 's|http://security.ubuntu.com/ubuntu|http://ports.ubuntu.com/ubuntu-ports|g' /etc/apt/sources.list.d/*.list 2>/dev/null || true
+            sed -i 's|http://archive.ubuntu.com/ubuntu|http://ports.ubuntu.com/ubuntu-ports|g' /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+        fi
+    fi
+
+    # Fix Sury PHP repository missing GPG keys if present
+    if [ -f /etc/apt/sources.list.d/php.list ] || grep -rq "packages.sury.org" /etc/apt/sources.list* 2>/dev/null; then
+        curl -sSLo /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg 2>/dev/null || true
+    fi
+
+    # Fix Debian/Ubuntu 24.04 mariadb-common update-alternatives and debian-start bug
     mkdir -p /etc/mysql/conf.d /etc/mysql/mariadb.conf.d
     if [ ! -f /etc/mysql/mariadb.cnf ]; then
         cat << 'EOF' > /etc/mysql/mariadb.cnf
@@ -124,9 +142,17 @@ if [ "$PKG_MANAGER" = "apt" ]; then
 EOF
     fi
     chmod 644 /etc/mysql/mariadb.cnf
+    
+    if [ ! -f /etc/mysql/debian-start ]; then
+        cat << 'EOF' > /etc/mysql/debian-start
+#!/bin/sh
+exit 0
+EOF
+    fi
+    chmod 755 /etc/mysql/debian-start 2>/dev/null || true
     dpkg --configure -a 2>/dev/null || true
 
-    apt-get update -y -q
+    apt-get update -y -q 2>/dev/null || apt-get update -y || true
     if ! apt-get install -y --no-install-recommends \
         postgresql \
         postgresql-contrib \
@@ -458,6 +484,14 @@ if command -v systemctl &>/dev/null; then
         fi
     fi
     
+    if [ ! -f /etc/mysql/debian-start ]; then
+        cat << 'EOF' > /etc/mysql/debian-start
+#!/bin/sh
+exit 0
+EOF
+    fi
+    chmod 755 /etc/mysql/debian-start 2>/dev/null || true
+
     systemctl enable mariadb 2>/dev/null || systemctl enable mysql 2>/dev/null || true
     systemctl restart mariadb 2>/dev/null || systemctl restart mysql 2>/dev/null || true
 elif command -v rc-service &>/dev/null; then

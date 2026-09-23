@@ -203,6 +203,8 @@ EOF
         mariadb-server \
         mariadb-client \
         nginx \
+        certbot \
+        python3-certbot-nginx \
         php-fpm \
         php-mysql \
         php-mbstring \
@@ -229,6 +231,8 @@ EOF
             mariadb-server \
             mariadb-client \
             nginx \
+            certbot \
+            python3-certbot-nginx \
             php-fpm \
             php-mysql \
             php-mbstring \

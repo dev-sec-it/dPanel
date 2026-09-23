@@ -233,9 +233,18 @@ log_info "Deploying dPanel core binaries..."
 
 HOST_ARCH="$(uname -m)"
 case "$HOST_ARCH" in
-    x86_64|amd64) ARCH_SUBDIR="x86_64" ;;
-    aarch64|arm64) ARCH_SUBDIR="aarch64" ;;
-    *) ARCH_SUBDIR="$HOST_ARCH" ;;
+    x86_64|amd64) 
+        ARCH_SUBDIR="x86_64"
+        ARCH_PATTERN="x86-64|x86_64|AMD64"
+        ;;
+    aarch64|arm64) 
+        ARCH_SUBDIR="aarch64"
+        ARCH_PATTERN="aarch64|ARM aarch64|ARM64"
+        ;;
+    *) 
+        ARCH_SUBDIR="$HOST_ARCH"
+        ARCH_PATTERN="$HOST_ARCH"
+        ;;
 esac
 
 SRC_DPANELD=""
@@ -254,7 +263,24 @@ for candidate_dir in \
     "/tmp/dpanel_install/bin"; do
     if [ -f "${candidate_dir}/dpaneld" ] && [ -f "${candidate_dir}/dpanel-server" ]; then
         chmod 755 "${candidate_dir}/dpaneld" "${candidate_dir}/dpanel-server" 2>/dev/null || true
-        if "${candidate_dir}/dpaneld" --help >/dev/null 2>&1 || "${candidate_dir}/dpanel-server" --help >/dev/null 2>&1 || ( ! "${candidate_dir}/dpaneld" 2>&1 | grep -qi "Exec format error" && [ -x "${candidate_dir}/dpaneld" ] ); then
+        
+        # Verify architecture via static inspection without starting daemon loop
+        IS_VALID_ARCH=false
+        if [ "${candidate_dir}" = "${SCRIPT_DIR}/bin/${ARCH_SUBDIR}" ] || [ "${candidate_dir}" = "/opt/dpanel-src/bin/${ARCH_SUBDIR}" ]; then
+            IS_VALID_ARCH=true
+        elif command -v file &>/dev/null; then
+            if file -b "${candidate_dir}/dpaneld" 2>/dev/null | grep -Eqi "$ARCH_PATTERN"; then
+                IS_VALID_ARCH=true
+            fi
+        elif command -v readelf &>/dev/null; then
+            if readelf -h "${candidate_dir}/dpaneld" 2>/dev/null | grep -Eqi "$ARCH_PATTERN"; then
+                IS_VALID_ARCH=true
+            fi
+        else
+            IS_VALID_ARCH=true
+        fi
+
+        if [ "$IS_VALID_ARCH" = true ]; then
             SRC_DPANELD="${candidate_dir}/dpaneld"
             SRC_SERVER="${candidate_dir}/dpanel-server"
             break

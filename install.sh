@@ -68,11 +68,9 @@ if [ "$DPANEL_EXISTING" = true ]; then
     if command -v systemctl &>/dev/null; then
         systemctl stop dpaneld 2>/dev/null || true
         systemctl stop dpanel-server 2>/dev/null || true
-        systemctl stop filebrowser 2>/dev/null || true
     elif command -v rc-service &>/dev/null; then
         rc-service dpaneld stop 2>/dev/null || true
         rc-service dpanel-server stop 2>/dev/null || true
-        rc-service filebrowser stop 2>/dev/null || true
     fi
     log_info "Previous services stopped."
 fi
@@ -229,35 +227,85 @@ chmod 700 /etc/dpanel
 chmod 777 /var/www/phpmyadmin/tmp
 
 # ------------------------------------------------------------------------------
-# 6. Deploy Pre-built Binaries (Instant Copy)
+# 6. Multi-Architecture Binary Resolution & Deployment
 # ------------------------------------------------------------------------------
-log_info "Deploying pre-built dPanel binaries..."
+log_info "Deploying dPanel core binaries..."
+
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+    x86_64|amd64) ARCH_SUBDIR="x86_64" ;;
+    aarch64|arm64) ARCH_SUBDIR="aarch64" ;;
+    *) ARCH_SUBDIR="$HOST_ARCH" ;;
+esac
 
 SRC_DPANELD=""
 SRC_SERVER=""
 
 for candidate_dir in \
+    "${SCRIPT_DIR}/bin/${ARCH_SUBDIR}" \
+    "${SCRIPT_DIR}/bin/${HOST_ARCH}" \
     "${SCRIPT_DIR}/bin" \
     "${SCRIPT_DIR}/target/release" \
     "${SCRIPT_DIR}/dist/bin" \
+    "/opt/dpanel-src/bin/${ARCH_SUBDIR}" \
     "/opt/dpanel-src/bin" \
     "/opt/dpanel-src/target/release" \
     "/tmp/dpanel/bin" \
     "/tmp/dpanel_install/bin"; do
     if [ -f "${candidate_dir}/dpaneld" ] && [ -f "${candidate_dir}/dpanel-server" ]; then
-        SRC_DPANELD="${candidate_dir}/dpaneld"
-        SRC_SERVER="${candidate_dir}/dpanel-server"
-        break
+        chmod 755 "${candidate_dir}/dpaneld" "${candidate_dir}/dpanel-server" 2>/dev/null || true
+        if "${candidate_dir}/dpaneld" --help >/dev/null 2>&1 || "${candidate_dir}/dpanel-server" --help >/dev/null 2>&1 || ( ! "${candidate_dir}/dpaneld" 2>&1 | grep -qi "Exec format error" && [ -x "${candidate_dir}/dpaneld" ] ); then
+            SRC_DPANELD="${candidate_dir}/dpaneld"
+            SRC_SERVER="${candidate_dir}/dpanel-server"
+            break
+        fi
     fi
 done
 
+# If no compatible pre-built binary matches host architecture, build natively from source
+if [ -z "$SRC_DPANELD" ] || [ -z "$SRC_SERVER" ]; then
+    BUILD_ROOT=""
+    if [ -f "${SCRIPT_DIR}/Cargo.toml" ]; then
+        BUILD_ROOT="${SCRIPT_DIR}"
+    elif [ -f "/opt/dpanel-src/Cargo.toml" ]; then
+        BUILD_ROOT="/opt/dpanel-src"
+    fi
+
+    if [ -n "$BUILD_ROOT" ]; then
+        log_info "No pre-built binary matching architecture ${HOST_ARCH}. Compiling native production binaries with Cargo..."
+        if [ "$PKG_MANAGER" = "apt" ]; then
+            apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev libpq-dev curl 2>/dev/null || true
+        elif [ "$PKG_MANAGER" = "apk" ]; then
+            apk add --no-cache build-base pkgconf openssl-dev postgresql-dev curl 2>/dev/null || true
+        fi
+
+        if ! command -v cargo &>/dev/null; then
+            log_info "Setting up minimal Rust compiler toolchain..."
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal >/dev/null 2>&1 || true
+            export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
+        fi
+
+        export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
+        if command -v cargo &>/dev/null; then
+            (cd "$BUILD_ROOT" && cargo build --release)
+            if [ -f "${BUILD_ROOT}/target/release/dpaneld" ] && [ -f "${BUILD_ROOT}/target/release/dpanel-server" ]; then
+                SRC_DPANELD="${BUILD_ROOT}/target/release/dpaneld"
+                SRC_SERVER="${BUILD_ROOT}/target/release/dpanel-server"
+                mkdir -p "${SCRIPT_DIR}/bin/${ARCH_SUBDIR}" 2>/dev/null || true
+                cp "$SRC_DPANELD" "${SCRIPT_DIR}/bin/${ARCH_SUBDIR}/dpaneld" 2>/dev/null || true
+                cp "$SRC_SERVER" "${SCRIPT_DIR}/bin/${ARCH_SUBDIR}/dpanel-server" 2>/dev/null || true
+            fi
+        fi
+    fi
+fi
+
 if [ -n "$SRC_DPANELD" ] && [ -n "$SRC_SERVER" ]; then
-    log_info "Installing binaries from ${candidate_dir}..."
+    log_info "Installing binaries from ${SRC_DPANELD%/*}..."
     cp "$SRC_DPANELD" /usr/local/bin/dpaneld
     cp "$SRC_SERVER" /usr/local/bin/dpanel-server
     chmod 755 /usr/local/bin/dpaneld /usr/local/bin/dpanel-server
 else
-    log_error "Pre-built dPanel binaries (dpanel-server, dpaneld) not found in ${SCRIPT_DIR}/bin."
+    log_error "Compatible dPanel binaries (dpanel-server, dpaneld) for ${HOST_ARCH} not found and compilation failed."
     exit 1
 fi
 
@@ -630,7 +678,6 @@ log_info "Configuring environment and credentials..."
 
 ADMIN_PASS=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 20)
 JWT_SECRET=$(head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9+/=' | head -c 64)
-FB_ADMIN_PASS=$(head -c 24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
 cat > /etc/dpanel/.env <<ENVEOF
 # dPanel Enterprise Production Configuration
@@ -644,56 +691,19 @@ DAEMON_SOCKET="/run/dpanel.sock"
 INITIAL_ADMIN_USERNAME="superadmin"
 INITIAL_ADMIN_EMAIL="admin@dpanel.enterprise"
 INITIAL_ADMIN_PASSWORD="${ADMIN_PASS}"
-FILEBROWSER_ADMIN_PASS="${FB_ADMIN_PASS}"
 ENVEOF
 
 chmod 600 /etc/dpanel/.env
 
-# ------------------------------------------------------------------------------
-# 10. Filebrowser Installation
-# ------------------------------------------------------------------------------
-log_info "Installing Filebrowser web file manager..."
-
-if [ ! -f /usr/local/bin/filebrowser ]; then
-    curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash 2>/dev/null || \
-    {
-        ARCH=$(uname -m)
-        FB_ARCH="amd64"
-        [ "$ARCH" = "aarch64" ] && FB_ARCH="arm64"
-        FB_VER=$(curl -s https://api.github.com/repos/filebrowser/filebrowser/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
-        curl -fsSL "https://github.com/filebrowser/filebrowser/releases/download/v${FB_VER}/linux-${FB_ARCH}-filebrowser.tar.gz" -o /tmp/fb.tar.gz 2>/dev/null || true
-        if [ -f /tmp/fb.tar.gz ]; then
-            tar -xzf /tmp/fb.tar.gz -C /tmp/
-            mv /tmp/filebrowser /usr/local/bin/filebrowser
-            rm -f /tmp/fb.tar.gz
-        fi
-    }
-fi
-
-if [ -f /usr/local/bin/filebrowser ]; then
-    chmod +x /usr/local/bin/filebrowser
-    mkdir -p /etc/filebrowser /var/log/filebrowser
-    
-    cat > /etc/filebrowser/config.json <<FBCONF
-{
-  "port": 8082,
-  "address": "127.0.0.1",
-  "database": "/etc/filebrowser/filebrowser.db",
-  "root": "/",
-  "baseURL": "/filemanager",
-  "log": "stdout"
-}
-FBCONF
-    
-    filebrowser config init -d /etc/filebrowser/filebrowser.db --config /etc/filebrowser/config.json 2>/dev/null || true
-    filebrowser config set -d /etc/filebrowser/filebrowser.db --auth.method=proxy --auth.header=X-Auth-User --baseURL="/filemanager" --root="/" 2>/dev/null || true
-    filebrowser users add admin "${FB_ADMIN_PASS}" --perm.admin=true -d /etc/filebrowser/filebrowser.db 2>/dev/null || \
-    filebrowser users update admin -p "${FB_ADMIN_PASS}" --perm.admin=true -d /etc/filebrowser/filebrowser.db 2>/dev/null || true
-    log_info "Filebrowser configured successfully on port 8082."
+# Clean up any legacy filebrowser services if present
+if command -v systemctl &>/dev/null; then
+    systemctl stop filebrowser 2>/dev/null || true
+    systemctl disable filebrowser 2>/dev/null || true
+    rm -f /etc/systemd/system/filebrowser.service /usr/local/bin/filebrowser
 fi
 
 # ------------------------------------------------------------------------------
-# 11. Configure System Services (systemd / OpenRC)
+# 10. Configure System Services (systemd / OpenRC)
 # ------------------------------------------------------------------------------
 log_info "Registering dPanel system services..."
 
@@ -738,31 +748,12 @@ StandardError=journal
 WantedBy=multi-user.target
 SERVICEEOF
 
-    if [ -f /usr/local/bin/filebrowser ]; then
-        cat > /etc/systemd/system/filebrowser.service <<SERVICEEOF
-[Unit]
-Description=Filebrowser SSO Service for dPanel
-After=network.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/local/bin/filebrowser --config /etc/filebrowser/config.json
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-SERVICEEOF
-    fi
-
     systemctl daemon-reload
-    systemctl enable dpaneld dpanel-server filebrowser nginx mariadb postgresql 2>/dev/null || true
+    systemctl enable dpaneld dpanel-server nginx mariadb postgresql 2>/dev/null || true
     systemctl restart mariadb 2>/dev/null || true
     systemctl restart dpaneld
     sleep 1
     systemctl restart dpanel-server
-    [ -f /usr/local/bin/filebrowser ] && systemctl restart filebrowser || true
 
 elif [ "$INIT_SYSTEM" = "openrc" ]; then
     cat > /etc/init.d/dpaneld <<'RCEOF'
@@ -797,6 +788,55 @@ RCEOF
     rc-service dpaneld restart
     sleep 1
     rc-service dpanel-server restart
+fi
+
+# ------------------------------------------------------------------------------
+# 11. Firewall & Essential Port Provisioning (2083, 80, 443, 888, 21, 22)
+# ------------------------------------------------------------------------------
+log_info "Configuring firewall and allowing production ports (2083, 80, 443, 888, 21, 22)..."
+
+# A. UFW (Ubuntu / Debian)
+if command -v ufw &>/dev/null; then
+    ufw allow 22/tcp comment 'SSH' 2>/dev/null || true
+    ufw allow 2083/tcp comment 'dPanel Control Plane' 2>/dev/null || true
+    ufw allow 80/tcp comment 'HTTP Web' 2>/dev/null || true
+    ufw allow 443/tcp comment 'HTTPS Web' 2>/dev/null || true
+    ufw allow 888/tcp comment 'phpMyAdmin SSO' 2>/dev/null || true
+    ufw allow 21/tcp comment 'FTP Control' 2>/dev/null || true
+    ufw allow 20/tcp comment 'FTP Data' 2>/dev/null || true
+    ufw allow 30000:30100/tcp comment 'FTP Passive Ports' 2>/dev/null || true
+    ufw allow 53/tcp comment 'DNS TCP' 2>/dev/null || true
+    ufw allow 53/udp comment 'DNS UDP' 2>/dev/null || true
+    if ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw reload 2>/dev/null || true
+    fi
+fi
+
+# B. Firewalld (RHEL / AlmaLinux / Rocky / CentOS)
+if command -v firewall-cmd &>/dev/null; then
+    if systemctl is-active --quiet firewalld 2>/dev/null; then
+        firewall-cmd --permanent --add-port=22/tcp 2>/dev/null || true
+        firewall-cmd --permanent --add-port=2083/tcp 2>/dev/null || true
+        firewall-cmd --permanent --add-port=80/tcp 2>/dev/null || true
+        firewall-cmd --permanent --add-port=443/tcp 2>/dev/null || true
+        firewall-cmd --permanent --add-port=888/tcp 2>/dev/null || true
+        firewall-cmd --permanent --add-port=21/tcp 2>/dev/null || true
+        firewall-cmd --permanent --add-port=20/tcp 2>/dev/null || true
+        firewall-cmd --permanent --add-port=30000-30100/tcp 2>/dev/null || true
+        firewall-cmd --permanent --add-port=53/tcp 2>/dev/null || true
+        firewall-cmd --permanent --add-port=53/udp 2>/dev/null || true
+        firewall-cmd --reload 2>/dev/null || true
+    fi
+fi
+
+# C. iptables Direct Rules (Universal fallback)
+if command -v iptables &>/dev/null; then
+    for port in 22 2083 80 443 888 21 20; do
+        iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
+    done
+    iptables -C INPUT -p tcp --dport 30000:30100 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 30000:30100 -j ACCEPT 2>/dev/null || true
+    iptables -C INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+    iptables -C INPUT -p tcp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
 fi
 
 # ------------------------------------------------------------------------------

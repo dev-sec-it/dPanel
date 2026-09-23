@@ -9,7 +9,7 @@
     "Direct GitHub In-Portal Update Center with Zero-Data-Loss In-Place Upgrade Engine",
     "Live PM2 Stdout & Stderr Log Stream Inspector with Real-Time Tail Extraction",
     "Streamlined Hosted Websites Table with Compact Icon-Only Action Toolbar",
-    "FileBrowser Auto-Fallback Directory Resolution with Inline Folder Creation"
+    "In-Portal File Manager & Code Editor with Auto-Fallback Directory Resolution and Inline Folder Creation"
   ],
   "download_url": "https://github.com/dev-sec-it/dPanel/releases/latest",
   "min_os_version": "Ubuntu 22.04 LTS, Debian 12, Alpine 3.19+"

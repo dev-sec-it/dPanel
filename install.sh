@@ -762,23 +762,42 @@ header('Location: ' . $redirect);
 exit;
 PMASSO
 
-PHP_SOCK=""
-# Start and assert all PHP-FPM services
-for fpm_svc in $(systemctl list-unit-files 'php*-fpm.service' --no-legend 2>/dev/null | awk '{print $1}'); do
-    systemctl unmask "$fpm_svc" 2>/dev/null || true
-    systemctl enable --now "$fpm_svc" 2>/dev/null || true
-    systemctl restart "$fpm_svc" 2>/dev/null || true
+mkdir -p /run/php /var/run/php /var/log/php
+chown -R www-data:www-data /run/php /var/run/php 2>/dev/null || true
+chmod 755 /run/php /var/run/php 2>/dev/null || true
+
+# Explicitly ensure all installed PHP-FPM services are started and unmasked
+for _ver in 8.4 8.3 8.2 8.1 7.4; do
+    if command -v "php-fpm${_ver}" &>/dev/null || systemctl list-unit-files "php${_ver}-fpm.service" 2>/dev/null | grep -q "php${_ver}-fpm"; then
+        systemctl unmask "php${_ver}-fpm" 2>/dev/null || true
+        systemctl enable --now "php${_ver}-fpm" 2>/dev/null || true
+        systemctl restart "php${_ver}-fpm" 2>/dev/null || true
+    fi
 done
+systemctl unmask php-fpm 2>/dev/null || true
 systemctl enable --now php-fpm 2>/dev/null || true
 systemctl restart php-fpm 2>/dev/null || true
 
+PHP_SOCK=""
 for s in /run/php/php8.5-fpm.sock /run/php/php8.4-fpm.sock /run/php/php8.3-fpm.sock /run/php/php8.2-fpm.sock /run/php/php8.1-fpm.sock /run/php/php-fpm.sock /var/run/php/php8.3-fpm.sock; do
     if [ -S "$s" ]; then
         PHP_SOCK="$s"
         break
     fi
 done
+
+if [ -z "$PHP_SOCK" ]; then
+    service php8.3-fpm restart 2>/dev/null || service php-fpm restart 2>/dev/null || true
+    sleep 1
+    for s in /run/php/php8.5-fpm.sock /run/php/php8.4-fpm.sock /run/php/php8.3-fpm.sock /run/php/php8.2-fpm.sock /run/php/php8.1-fpm.sock /run/php/php-fpm.sock; do
+        if [ -S "$s" ]; then
+            PHP_SOCK="$s"
+            break
+        fi
+    done
+fi
 [ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php8.3-fpm.sock"
+ln -sf "$PHP_SOCK" /run/php/php-fpm.sock 2>/dev/null || true
 
 mkdir -p /etc/nginx/conf.d /etc/nginx/sites-available /etc/nginx/sites-enabled /var/www/html /www/wwwroot /var/www/dpanel-acme-challenge
 chmod 777 /var/www/dpanel-acme-challenge 2>/dev/null || true

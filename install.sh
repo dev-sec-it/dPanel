@@ -121,6 +121,8 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         postgresql \
         postgresql-contrib \
         libpq5 \
+        mariadb-server \
+        mariadb-client \
         nginx \
         php-fpm \
         php-mysql \
@@ -142,6 +144,8 @@ elif [ "$PKG_MANAGER" = "apk" ]; then
         postgresql16 \
         postgresql16-contrib \
         libpq \
+        mariadb \
+        mariadb-client \
         nginx \
         php83-fpm \
         php83-mysqli \
@@ -286,9 +290,20 @@ su - postgres -s /bin/sh -c "${PG_BIN:+$PG_BIN/}psql -d dpanel_db -c 'ALTER DEFA
 log_info "Database setup completed."
 
 # ------------------------------------------------------------------------------
-# 8. phpMyAdmin & Nginx Port 888 Setup
+# 8. MariaDB & phpMyAdmin 1-Click SSO Port 888 Setup
 # ------------------------------------------------------------------------------
-log_info "Setting up phpMyAdmin on Port 888..."
+log_info "Setting up MariaDB & phpMyAdmin with 1-Click SSO on Port 888..."
+
+if command -v systemctl &>/dev/null; then
+    systemctl enable --now mariadb 2>/dev/null || systemctl enable --now mysql 2>/dev/null || true
+elif command -v rc-service &>/dev/null; then
+    rc-service mariadb start 2>/dev/null || true
+fi
+
+# Configure MariaDB dpanel_admin DBA user for secure internal SSO
+mysql -u root -e "CREATE USER IF NOT EXISTS 'dpanel_admin'@'localhost' IDENTIFIED BY 'dPanel_MySQL_Pass_2026!';" 2>/dev/null || true
+mysql -u root -e "CREATE USER IF NOT EXISTS 'dpanel_admin'@'127.0.0.1' IDENTIFIED BY 'dPanel_MySQL_Pass_2026!';" 2>/dev/null || true
+mysql -u root -e "GRANT ALL PRIVILEGES ON *.* TO 'dpanel_admin'@'localhost' WITH GRANT OPTION; GRANT ALL PRIVILEGES ON *.* TO 'dpanel_admin'@'127.0.0.1' WITH GRANT OPTION; FLUSH PRIVILEGES;" 2>/dev/null || true
 
 if [ ! -f "/var/www/phpmyadmin/index.php" ]; then
     curl -sSL https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.tar.gz -o /tmp/pma.tar.gz 2>/dev/null || true
@@ -304,18 +319,195 @@ declare(strict_types=1);
 $cfg['blowfish_secret'] = 'dpanel_secure_blowfish_key_32_chars_ok!';
 $i = 0;
 $i++;
-$cfg['Servers'][$i]['auth_type'] = 'cookie';
+$cfg['Servers'][$i]['auth_type'] = 'signon';
 $cfg['Servers'][$i]['host'] = '127.0.0.1';
 $cfg['Servers'][$i]['port'] = '3306';
 $cfg['Servers'][$i]['compress'] = false;
-$cfg['Servers'][$i]['AllowNoPassword'] = true;
+$cfg['Servers'][$i]['AllowNoPassword'] = false;
+$cfg['Servers'][$i]['SignonScript'] = '/var/www/phpmyadmin/signon_checker.php';
+$cfg['Servers'][$i]['SignonURL'] = 'sso.php';
 $cfg['UploadDir'] = '';
 $cfg['SaveDir'] = '';
 $cfg['TempDir'] = '/var/www/phpmyadmin/tmp';
+$cfg['CheckConfigurationPermissions'] = false;
 PMAEOF
 
+cat > /var/www/phpmyadmin/signon_checker.php <<'PMASIGNON'
+<?php
+declare(strict_types=1);
+
+/**
+ * dPanel Enterprise Session Checker for phpMyAdmin
+ * Enforces authenticated active session validation on EVERY request.
+ */
+function get_login_credentials($user)
+{
+    $sessionDir = '/var/www/phpmyadmin/tmp/sessions';
+    if (!is_dir($sessionDir)) {
+        @mkdir($sessionDir, 0700, true);
+    }
+
+    $cookieName = 'dpanel_pma_auth';
+    if (empty($_COOKIE[$cookieName])) {
+        return ['', ''];
+    }
+
+    $token = trim($_COOKIE[$cookieName]);
+    if (!preg_match('/^[0-9a-fA-F]{32}$/', $token)) {
+        return ['', ''];
+    }
+
+    $sessionFile = $sessionDir . '/sess_' . $token . '.json';
+    if (!file_exists($sessionFile)) {
+        return ['', ''];
+    }
+
+    $content = @file_get_contents($sessionFile);
+    if (!$content) {
+        return ['', ''];
+    }
+
+    $data = @json_decode($content, true);
+    if (!$data || empty($data['db_user']) || empty($data['db_pass']) || empty($data['expires_at'])) {
+        @unlink($sessionFile);
+        return ['', ''];
+    }
+
+    // Check expiration (inactivity timeout)
+    if (time() > (int)$data['expires_at']) {
+        @unlink($sessionFile);
+        return ['', ''];
+    }
+
+    // Sliding expiration: extend session on active use (15 mins)
+    $data['expires_at'] = time() + 900;
+    @file_put_contents($sessionFile, json_encode($data), LOCK_EX);
+
+    return [
+        $data['db_user'],
+        $data['db_pass']
+    ];
+}
+PMASIGNON
+
+cat > /var/www/phpmyadmin/sso.php <<'PMASSO'
+<?php
+declare(strict_types=1);
+
+$ticket = isset($_GET['ticket']) ? trim($_GET['ticket']) : '';
+
+if (empty($ticket) || !preg_match('/^[0-9a-fA-F-]{36}$/', $ticket)) {
+    http_response_code(403);
+    header('Content-Type: text/html; charset=utf-8');
+    echo '<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>403 Forbidden - dPanel phpMyAdmin SSO</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8fafc; color: #1e293b; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); padding: 2.5rem; max-width: 440px; text-align: center; }
+        .badge { display: inline-block; padding: 4px 12px; background: #fee2e2; color: #ef4444; font-weight: 600; font-size: 0.875rem; border-radius: 9999px; margin-bottom: 1rem; }
+        h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.5rem; }
+        p { color: #64748b; font-size: 0.875rem; line-height: 1.5; margin-bottom: 1.5rem; }
+        .btn { display: inline-block; background: #2563eb; color: #ffffff; padding: 0.625rem 1.25rem; border-radius: 6px; font-weight: 500; font-size: 0.875rem; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="badge">403 Forbidden</div>
+        <h1>Authentication Required</h1>
+        <p>Direct login without an active dPanel session ticket is strictly prohibited. Please log in to dPanel and launch phpMyAdmin from your control panel.</p>
+        <a href="http://' . htmlspecialchars($_SERVER['HTTP_HOST'] ? explode(':', $_SERVER['HTTP_HOST'])[0] : 'localhost') . ':2083" class="btn">Return to dPanel</a>
+    </div>
+</body>
+</html>';
+    exit;
+}
+
+// Contact dPanel Core Server over local loopback to verify and atomically consume ticket
+$ch = curl_init('http://127.0.0.1:2083/api/v1/databases/sso/verify?ticket=' . urlencode($ticket));
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 3);
+$response = curl_exec($ch);
+$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+
+if ($httpCode !== 200 || !$response) {
+    http_response_code(403);
+    header('Content-Type: text/html; charset=utf-8');
+    echo '<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Session Expired - dPanel phpMyAdmin SSO</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8fafc; color: #1e293b; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); padding: 2.5rem; max-width: 440px; text-align: center; }
+        .badge { display: inline-block; padding: 4px 12px; background: #fee2e2; color: #ef4444; font-weight: 600; font-size: 0.875rem; border-radius: 9999px; margin-bottom: 1rem; }
+        h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.5rem; }
+        p { color: #64748b; font-size: 0.875rem; line-height: 1.5; margin-bottom: 1.5rem; }
+        .btn { display: inline-block; background: #2563eb; color: #ffffff; padding: 0.625rem 1.25rem; border-radius: 6px; font-weight: 500; font-size: 0.875rem; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="badge">Session Invalid</div>
+        <h1>Ticket Expired or Used</h1>
+        <p>This single-use authentication ticket is invalid or has already expired. Please re-launch phpMyAdmin from dPanel.</p>
+        <a href="http://' . htmlspecialchars($_SERVER['HTTP_HOST'] ? explode(':', $_SERVER['HTTP_HOST'])[0] : 'localhost') . ':2083" class="btn">Return to dPanel</a>
+    </div>
+</body>
+</html>';
+    exit;
+}
+
+$payload = json_decode($response, true);
+if (empty($payload['valid']) || empty($payload['db_user']) || empty($payload['db_pass'])) {
+    http_response_code(403);
+    die('Invalid authentication payload');
+}
+
+// Generate new authenticated session token for phpMyAdmin session checker
+$sessionToken = bin2hex(random_bytes(16));
+$sessionDir = '/var/www/phpmyadmin/tmp/sessions';
+if (!is_dir($sessionDir)) {
+    @mkdir($sessionDir, 0700, true);
+}
+
+$sessionData = [
+    'token' => $sessionToken,
+    'db_user' => $payload['db_user'],
+    'db_pass' => $payload['db_pass'],
+    'db_name' => $payload['db_name'] ?? '',
+    'created_at' => time(),
+    'expires_at' => time() + 900
+];
+
+file_put_contents($sessionDir . '/sess_' . $sessionToken . '.json', json_encode($sessionData), LOCK_EX);
+
+// Set secure session cookie
+setcookie('dpanel_pma_auth', $sessionToken, [
+    'expires' => time() + 86400,
+    'path' => '/',
+    'httponly' => true,
+    'samesite' => 'Lax'
+]);
+
+$redirect = 'index.php' . (!empty($payload['db_name']) ? '?db=' . urlencode($payload['db_name']) : '');
+header('Location: ' . $redirect);
+exit;
+PMASSO
+
 PHP_SOCK=""
-for s in /run/php/php8.5-fpm.sock /run/php/php8.4-fpm.sock /run/php/php8.3-fpm.sock /run/php/php8.2-fpm.sock /run/php/php-fpm.sock; do
+# Start PHP-FPM service first to generate socket
+for fpm_svc in $(systemctl list-unit-files 'php*-fpm.service' --no-legend 2>/dev/null | awk '{print $1}'); do
+    systemctl enable --now "$fpm_svc" 2>/dev/null || true
+done
+systemctl enable --now php-fpm 2>/dev/null || true
+
+for s in /run/php/php8.5-fpm.sock /run/php/php8.4-fpm.sock /run/php/php8.3-fpm.sock /run/php/php8.2-fpm.sock /run/php/php8.1-fpm.sock /run/php/php-fpm.sock; do
     if [ -S "$s" ]; then
         PHP_SOCK="$s"
         break
@@ -353,6 +545,7 @@ server {
 NGINXCONF
 
 chown -R www-data:www-data /var/www/phpmyadmin 2>/dev/null || true
+chmod 644 /var/www/phpmyadmin/config.inc.php /var/www/phpmyadmin/sso.php 2>/dev/null || true
 if command -v systemctl &>/dev/null; then
     systemctl restart nginx 2>/dev/null || true
 fi
@@ -411,7 +604,7 @@ if [ -f /usr/local/bin/filebrowser ]; then
     cat > /etc/filebrowser/config.json <<FBCONF
 {
   "port": 8082,
-  "address": "0.0.0.0",
+  "address": "127.0.0.1",
   "database": "/etc/filebrowser/filebrowser.db",
   "root": "/",
   "baseURL": "/filemanager",
@@ -419,10 +612,10 @@ if [ -f /usr/local/bin/filebrowser ]; then
 }
 FBCONF
     
-    filebrowser config init --config /etc/filebrowser/config.json 2>/dev/null || true
-    filebrowser config set --config /etc/filebrowser/config.json --auth.method=json --auth.header=X-Auth-Token --baseURL="/filemanager" --root="/" 2>/dev/null || true
-    filebrowser users add admin "${FB_ADMIN_PASS}" --perm.admin=true --config /etc/filebrowser/config.json 2>/dev/null || \
-    filebrowser users update admin --password "${FB_ADMIN_PASS}" --perm.admin=true --config /etc/filebrowser/config.json 2>/dev/null || true
+    filebrowser config init -d /etc/filebrowser/filebrowser.db --config /etc/filebrowser/config.json 2>/dev/null || true
+    filebrowser config set -d /etc/filebrowser/filebrowser.db --auth.method=proxy --auth.header=X-Auth-User --baseURL="/filemanager" --root="/" 2>/dev/null || true
+    filebrowser users add admin "${FB_ADMIN_PASS}" --perm.admin=true -d /etc/filebrowser/filebrowser.db 2>/dev/null || \
+    filebrowser users update admin -p "${FB_ADMIN_PASS}" --perm.admin=true -d /etc/filebrowser/filebrowser.db 2>/dev/null || true
     log_info "Filebrowser configured successfully on port 8082."
 fi
 
@@ -435,7 +628,7 @@ if [ "$INIT_SYSTEM" = "systemd" ]; then
     cat > /etc/systemd/system/dpaneld.service <<SERVICEEOF
 [Unit]
 Description=dPanel Core Privileged Daemon
-After=network.target postgresql.service
+After=network.target postgresql.service mariadb.service
 Wants=network.target
 
 [Service]
@@ -455,7 +648,7 @@ SERVICEEOF
     cat > /etc/systemd/system/dpanel-server.service <<SERVICEEOF
 [Unit]
 Description=dPanel Control Plane Web Server
-After=network.target dpaneld.service postgresql.service
+After=network.target dpaneld.service postgresql.service mariadb.service
 Wants=dpaneld.service
 
 [Service]
@@ -491,7 +684,8 @@ SERVICEEOF
     fi
 
     systemctl daemon-reload
-    systemctl enable dpaneld dpanel-server filebrowser nginx 2>/dev/null || true
+    systemctl enable dpaneld dpanel-server filebrowser nginx mariadb postgresql 2>/dev/null || true
+    systemctl restart mariadb 2>/dev/null || true
     systemctl restart dpaneld
     sleep 1
     systemctl restart dpanel-server

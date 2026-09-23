@@ -441,16 +441,50 @@ log_info "Database setup completed."
 # ------------------------------------------------------------------------------
 log_info "Setting up MariaDB & phpMyAdmin with 1-Click SSO on Port 888..."
 
+mkdir -p /run/mysqld /var/lib/mysql /var/log/mysql
+chown -R mysql:mysql /run/mysqld /var/lib/mysql /var/log/mysql 2>/dev/null || true
+chmod 755 /run/mysqld
+
 if command -v systemctl &>/dev/null; then
-    systemctl enable --now mariadb 2>/dev/null || systemctl enable --now mysql 2>/dev/null || true
+    systemctl unmask mariadb mysql 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    
+    # Initialize MariaDB data directory if missing
+    if [ ! -d "/var/lib/mysql/mysql" ]; then
+        if command -v mariadb-install-db &>/dev/null; then
+            mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null 2>&1 || true
+        elif command -v mysql_install_db &>/dev/null; then
+            mysql_install_db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null 2>&1 || true
+        fi
+    fi
+    
+    systemctl enable mariadb 2>/dev/null || systemctl enable mysql 2>/dev/null || true
+    systemctl restart mariadb 2>/dev/null || systemctl restart mysql 2>/dev/null || true
 elif command -v rc-service &>/dev/null; then
-    rc-service mariadb start 2>/dev/null || true
+    if [ ! -d "/var/lib/mysql/mysql" ]; then
+        mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null 2>&1 || true
+    fi
+    rc-service mariadb restart 2>/dev/null || true
 fi
 
-# Configure MariaDB dpanel_admin DBA user for secure internal SSO
-mysql -u root -e "CREATE USER IF NOT EXISTS 'dpanel_admin'@'localhost' IDENTIFIED BY 'dPanel_MySQL_Pass_2026!';" 2>/dev/null || true
-mysql -u root -e "CREATE USER IF NOT EXISTS 'dpanel_admin'@'127.0.0.1' IDENTIFIED BY 'dPanel_MySQL_Pass_2026!';" 2>/dev/null || true
-mysql -u root -e "GRANT ALL PRIVILEGES ON *.* TO 'dpanel_admin'@'localhost' WITH GRANT OPTION; GRANT ALL PRIVILEGES ON *.* TO 'dpanel_admin'@'127.0.0.1' WITH GRANT OPTION; FLUSH PRIVILEGES;" 2>/dev/null || true
+# Wait and assert MariaDB is responsive
+_mysql_ready=0
+for _i in 1 2 3 4 5 6 7 8 9 10; do
+    if mysqladmin ping --silent 2>/dev/null || mysql -u root -e "SELECT 1" >/dev/null 2>&1; then
+        _mysql_ready=1
+        break
+    fi
+    sleep 1
+done
+
+if [ "$_mysql_ready" -eq 1 ]; then
+    log_info "MariaDB is active and ready."
+    mysql -u root -e "CREATE USER IF NOT EXISTS 'dpanel_admin'@'localhost' IDENTIFIED BY 'dPanel_MySQL_Pass_2026!';" 2>/dev/null || true
+    mysql -u root -e "CREATE USER IF NOT EXISTS 'dpanel_admin'@'127.0.0.1' IDENTIFIED BY 'dPanel_MySQL_Pass_2026!';" 2>/dev/null || true
+    mysql -u root -e "GRANT ALL PRIVILEGES ON *.* TO 'dpanel_admin'@'localhost' WITH GRANT OPTION; GRANT ALL PRIVILEGES ON *.* TO 'dpanel_admin'@'127.0.0.1' WITH GRANT OPTION; FLUSH PRIVILEGES;" 2>/dev/null || true
+else
+    log_warn "MariaDB is starting up. Check status with: systemctl status mariadb"
+fi
 
 if [ ! -f "/var/www/phpmyadmin/index.php" ]; then
     curl -sSL https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.tar.gz -o /tmp/pma.tar.gz 2>/dev/null || true
@@ -664,8 +698,7 @@ done
 
 cat > /etc/nginx/conf.d/phpmyadmin.conf <<NGINXCONF
 server {
-    listen 888 default_server;
-    listen [::]:888 default_server;
+    listen 888;
     server_name _;
     root /var/www/phpmyadmin;
     index index.php index.html;
@@ -694,6 +727,7 @@ NGINXCONF
 chown -R www-data:www-data /var/www/phpmyadmin 2>/dev/null || true
 chmod 644 /var/www/phpmyadmin/config.inc.php /var/www/phpmyadmin/sso.php 2>/dev/null || true
 if command -v systemctl &>/dev/null; then
+    systemctl restart php*-fpm php-fpm 2>/dev/null || true
     systemctl restart nginx 2>/dev/null || true
 fi
 
@@ -777,6 +811,7 @@ SERVICEEOF
     systemctl daemon-reload
     systemctl enable dpaneld dpanel-server nginx mariadb postgresql 2>/dev/null || true
     systemctl restart mariadb 2>/dev/null || true
+    systemctl restart nginx 2>/dev/null || true
     systemctl restart dpaneld
     sleep 1
     systemctl restart dpanel-server
@@ -817,9 +852,9 @@ RCEOF
 fi
 
 # ------------------------------------------------------------------------------
-# 11. Firewall & Essential Port Provisioning (2083, 80, 443, 888, 21, 22)
+# 11. Firewall & Essential Port Provisioning (2083, 80, 443, 888, 21, 22, 53)
 # ------------------------------------------------------------------------------
-log_info "Configuring firewall and allowing production ports (2083, 80, 443, 888, 21, 22)..."
+log_info "Configuring firewall and allowing production ports (2083, 80, 443, 888, 21, 22, 53)..."
 
 # A. UFW (Ubuntu / Debian)
 if command -v ufw &>/dev/null; then
@@ -855,14 +890,16 @@ if command -v firewall-cmd &>/dev/null; then
     fi
 fi
 
-# C. iptables Direct Rules (Universal fallback)
+# C. iptables Direct Rules (Universal fallback & Oracle Cloud override)
 if command -v iptables &>/dev/null; then
-    for port in 22 2083 80 443 888 21 20; do
-        iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
+    for port in 22 2083 80 443 888 21 20 53; do
+        iptables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
     done
-    iptables -C INPUT -p tcp --dport 30000:30100 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 30000:30100 -j ACCEPT 2>/dev/null || true
-    iptables -C INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-    iptables -C INPUT -p tcp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+    iptables -I INPUT 1 -p tcp --dport 30000:30100 -j ACCEPT 2>/dev/null || true
+    iptables -I INPUT 1 -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+    if command -v iptables-save &>/dev/null; then
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    fi
 fi
 
 # ------------------------------------------------------------------------------

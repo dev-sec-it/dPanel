@@ -296,18 +296,52 @@ if [ "$PKG_MANAGER" = "apk" ]; then
         su - postgres -s /bin/sh -c "PATH=\"${PG_BIN}:\$PATH\" pg_ctl start -D /var/lib/postgresql/data -l /var/log/postgresql.log -w -t 20" || true
     fi
 elif [ "$PKG_MANAGER" = "apt" ]; then
+    # Unmask PostgreSQL units if masked by cloud-init or previous package uninstall
     if command -v systemctl &>/dev/null; then
+        systemctl unmask postgresql 2>/dev/null || true
+        systemctl unmask postgresql@* 2>/dev/null || true
+        if [ -L /etc/systemd/system/postgresql.service ]; then
+            rm -f /etc/systemd/system/postgresql.service
+        fi
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+
+    # Ensure PostgreSQL runtime socket directories
+    mkdir -p /run/postgresql /var/run/postgresql
+    chown -R postgres:postgres /run/postgresql /var/run/postgresql 2>/dev/null || true
+    chmod 775 /run/postgresql /var/run/postgresql 2>/dev/null || true
+
+    # Start clusters via pg_ctlcluster (Debian/Ubuntu standard)
+    if command -v pg_ctlcluster &>/dev/null; then
+        for _ver in 17 16 15 14 13 12; do
+            if [ -d "/etc/postgresql/${_ver}/main" ] || [ -d "/var/lib/postgresql/${_ver}/main" ]; then
+                pg_ctlcluster "${_ver}" main start 2>/dev/null || true
+            fi
+        done
+    fi
+
+    if command -v systemctl &>/dev/null; then
+        systemctl enable postgresql 2>/dev/null || true
         systemctl start postgresql 2>/dev/null || true
+        systemctl start postgresql@16-main 2>/dev/null || true
     else
         service postgresql start 2>/dev/null || true
     fi
 fi
 
 _pg_ready=0
-for _i in 1 2 3 4 5 6 7 8 9 10; do
+for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     if su - postgres -s /bin/sh -c "${PG_BIN:+$PG_BIN/}psql -c 'SELECT 1'" >/dev/null 2>&1; then
         _pg_ready=1
         break
+    fi
+    if [ "$_i" -eq 3 ] || [ "$_i" -eq 7 ]; then
+        if command -v pg_ctlcluster &>/dev/null; then
+            pg_ctlcluster 16 main start 2>/dev/null || true
+        fi
+        if command -v systemctl &>/dev/null; then
+            systemctl start postgresql 2>/dev/null || true
+        fi
     fi
     sleep 1
 done

@@ -36,7 +36,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 2. Existing Installation Detection & Cleanup
+# 2. Existing Installation Detection & Complete Clean-up for Fresh Reinstall
 # ------------------------------------------------------------------------------
 DPANEL_EXISTING=false
 
@@ -47,32 +47,75 @@ if command -v systemctl &>/dev/null; then
     fi
 fi
 
-if [ -f "/usr/local/bin/dpaneld" ] || [ -f "/usr/local/bin/dpanel-server" ] || [ -d "/etc/dpanel" ]; then
+if [ -f "/usr/local/bin/dpaneld" ] || [ -f "/usr/local/bin/dpanel-server" ] || [ -d "/etc/dpanel" ] || [ -f "/etc/systemd/system/dpanel-server.service" ]; then
     DPANEL_EXISTING=true
 fi
 
-if [ "$DPANEL_EXISTING" = true ] && [ "${DPANEL_FORCE_REINSTALL:-0}" != "1" ] && [ -t 0 ]; then
-    log_section "Existing dPanel Installation Detected"
-    log_warn "A previous dPanel installation was found on this server."
-    echo ""
-    read -r -p "  Do you want to reinstall fresh? [y/N]: " CONFIRM_UNINSTALL
-    echo ""
-    if [[ ! "$CONFIRM_UNINSTALL" =~ ^[Yy]$ ]]; then
-        log_warn "Installation cancelled. Existing installation retained."
-        exit 0
+DO_CLEAN_REINSTALL=false
+
+if [ "$DPANEL_EXISTING" = true ]; then
+    if [ "${DPANEL_FORCE_REINSTALL:-0}" = "1" ]; then
+        DO_CLEAN_REINSTALL=true
+    elif [ -t 0 ]; then
+        log_section "Existing dPanel Installation Detected"
+        log_warn "A previous dPanel installation was found on this server."
+        echo ""
+        read -r -p "  Do you want to wipe previous data and perform a clean fresh install? [y/N]: " CONFIRM_UNINSTALL
+        echo ""
+        if [[ "$CONFIRM_UNINSTALL" =~ ^[Yy]$ ]]; then
+            DO_CLEAN_REINSTALL=true
+        else
+            log_warn "Installation cancelled. Existing installation retained."
+            exit 0
+        fi
     fi
 fi
 
-if [ "$DPANEL_EXISTING" = true ]; then
-    log_info "Stopping existing dPanel services..."
+if [ "$DO_CLEAN_REINSTALL" = true ]; then
+    log_section "Performing Complete System Cleanup (Zero Residue)"
+    
+    # 1. Stop and disable all previous dPanel & legacy services
+    log_info "Stopping and disabling previous dPanel services..."
     if command -v systemctl &>/dev/null; then
-        systemctl stop dpaneld 2>/dev/null || true
-        systemctl stop dpanel-server 2>/dev/null || true
+        systemctl stop dpaneld dpanel-server filebrowser 2>/dev/null || true
+        systemctl disable dpaneld dpanel-server filebrowser 2>/dev/null || true
+        rm -f /etc/systemd/system/dpaneld.service \
+              /etc/systemd/system/dpanel-server.service \
+              /etc/systemd/system/filebrowser.service
+        systemctl daemon-reload 2>/dev/null || true
     elif command -v rc-service &>/dev/null; then
         rc-service dpaneld stop 2>/dev/null || true
         rc-service dpanel-server stop 2>/dev/null || true
+        rc-update del dpaneld 2>/dev/null || true
+        rc-update del dpanel-server 2>/dev/null || true
+        rm -f /etc/init.d/dpaneld /etc/init.d/dpanel-server
     fi
-    log_info "Previous services stopped."
+
+    # 2. Clean previous PostgreSQL dpanel_db and roles
+    log_info "Cleaning previous PostgreSQL database and roles..."
+    if command -v su &>/dev/null; then
+        su - postgres -s /bin/sh -c "psql -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'dpanel_db';\"" >/dev/null 2>&1 || true
+        su - postgres -s /bin/sh -c "psql -c 'DROP DATABASE IF EXISTS dpanel_db;'" >/dev/null 2>&1 || true
+        su - postgres -s /bin/sh -c "psql -c 'DROP USER IF EXISTS dpanel;'" >/dev/null 2>&1 || true
+    fi
+
+    # 3. Clean previous MariaDB/MySQL internal DBA users and tables
+    log_info "Cleaning previous MariaDB internal state..."
+    if command -v mysql &>/dev/null; then
+        mysql -u root -e "DROP USER IF EXISTS 'dpanel_admin'@'localhost'; DROP USER IF EXISTS 'dpanel_admin'@'127.0.0.1'; FLUSH PRIVILEGES;" >/dev/null 2>&1 || true
+    fi
+
+    # 4. Remove all previous dPanel files, directories, sockets, and configurations
+    log_info "Removing previous configuration files, sockets, and binaries..."
+    rm -rf /etc/dpanel
+    rm -rf /var/dpanel/ipc /var/dpanel/ssl /run/dpanel /run/dpanel.sock
+    rm -rf /var/log/dpanel
+    rm -f /usr/local/bin/dpaneld /usr/local/bin/dpanel-server /usr/local/bin/filebrowser
+    rm -f /etc/nginx/conf.d/phpmyadmin.conf
+    rm -rf /var/www/phpmyadmin/tmp/sessions
+    rm -f /var/www/phpmyadmin/sso.php /var/www/phpmyadmin/signon_checker.php
+
+    log_info "Cleanup complete. Ready for clean fresh installation."
 fi
 
 # ------------------------------------------------------------------------------
@@ -716,13 +759,16 @@ exit;
 PMASSO
 
 PHP_SOCK=""
-# Start PHP-FPM service first to generate socket
+# Start and assert all PHP-FPM services
 for fpm_svc in $(systemctl list-unit-files 'php*-fpm.service' --no-legend 2>/dev/null | awk '{print $1}'); do
+    systemctl unmask "$fpm_svc" 2>/dev/null || true
     systemctl enable --now "$fpm_svc" 2>/dev/null || true
+    systemctl restart "$fpm_svc" 2>/dev/null || true
 done
 systemctl enable --now php-fpm 2>/dev/null || true
+systemctl restart php-fpm 2>/dev/null || true
 
-for s in /run/php/php8.5-fpm.sock /run/php/php8.4-fpm.sock /run/php/php8.3-fpm.sock /run/php/php8.2-fpm.sock /run/php/php8.1-fpm.sock /run/php/php-fpm.sock; do
+for s in /run/php/php8.5-fpm.sock /run/php/php8.4-fpm.sock /run/php/php8.3-fpm.sock /run/php/php8.2-fpm.sock /run/php/php8.1-fpm.sock /run/php/php-fpm.sock /var/run/php/php8.3-fpm.sock; do
     if [ -S "$s" ]; then
         PHP_SOCK="$s"
         break
@@ -730,9 +776,17 @@ for s in /run/php/php8.5-fpm.sock /run/php/php8.4-fpm.sock /run/php/php8.3-fpm.s
 done
 [ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php8.3-fpm.sock"
 
-cat > /etc/nginx/conf.d/phpmyadmin.conf <<NGINXCONF
+mkdir -p /etc/nginx/conf.d /etc/nginx/sites-available /etc/nginx/sites-enabled /var/www/html /www/wwwroot /var/www/dpanel-acme-challenge
+chmod 777 /var/www/dpanel-acme-challenge 2>/dev/null || true
+
+# Remove duplicate default servers from conf.d
+rm -f /etc/nginx/conf.d/phpmyadmin.conf /etc/nginx/conf.d/default.conf /etc/nginx/sites-enabled/default 2>/dev/null || true
+
+# Provision Port 888 phpMyAdmin VHost
+cat > /etc/nginx/sites-available/phpmyadmin.conf <<NGINXCONF
 server {
-    listen 888;
+    listen 888 default_server;
+    listen [::]:888 default_server;
     server_name _;
     root /var/www/phpmyadmin;
     index index.php index.html;
@@ -750,6 +804,8 @@ server {
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         fastcgi_param PATH_INFO \$fastcgi_path_info;
         fastcgi_read_timeout 300;
+        fastcgi_buffer_size 128k;
+        fastcgi_buffers 4 256k;
     }
 
     location ~ /\. {
@@ -758,11 +814,79 @@ server {
 }
 NGINXCONF
 
-chown -R www-data:www-data /var/www/phpmyadmin 2>/dev/null || true
-chmod 644 /var/www/phpmyadmin/config.inc.php /var/www/phpmyadmin/sso.php 2>/dev/null || true
+ln -sf /etc/nginx/sites-available/phpmyadmin.conf /etc/nginx/sites-enabled/phpmyadmin.conf
+
+# Provision Port 80 Default Welcome Landing Page
+cat > /var/www/html/index.html <<'HTMLEOF'
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>dPanel Enterprise Web Server</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8fafc; color: #1e293b; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .box { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.05); padding: 3rem; max-width: 500px; text-align: center; }
+        .logo { font-size: 2rem; font-weight: 700; color: #16a34a; margin-bottom: 0.5rem; }
+        h2 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.75rem; }
+        p { color: #64748b; font-size: 0.95rem; line-height: 1.6; margin-bottom: 2rem; }
+        .btn { display: inline-block; background: #16a34a; color: #ffffff; padding: 0.75rem 1.5rem; border-radius: 8px; font-weight: 600; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <div class="logo">dPanel Enterprise</div>
+        <h2>Web Server is Online</h2>
+        <p>The high-performance Nginx web server is operational. Manage your websites, domains, SSL, Node.js applications, and databases from your control panel.</p>
+        <a href="http://127.0.0.1:2083" class="btn" id="pnlLink">Open Control Panel</a>
+    </div>
+    <script>
+        document.getElementById('pnlLink').href = 'http://' + window.location.hostname + ':2083';
+    </script>
+</body>
+</html>
+HTMLEOF
+
+cat > /etc/nginx/sites-available/default.conf <<'DEFAULTCONF'
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    root /var/www/html;
+    index index.html index.php;
+
+    # ACME Challenge location
+    location /.well-known/acme-challenge/ {
+        root /var/www/dpanel-acme-challenge;
+        try_files $uri =404;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+DEFAULTCONF
+
+ln -sf /etc/nginx/sites-available/default.conf /etc/nginx/sites-enabled/default.conf
+
+# Allow firewall rules
+if command -v ufw &>/dev/null; then
+    ufw allow 80/tcp 2>/dev/null || true
+    ufw allow 443/tcp 2>/dev/null || true
+    ufw allow 888/tcp 2>/dev/null || true
+    ufw allow 2083/tcp 2>/dev/null || true
+fi
+if command -v iptables &>/dev/null; then
+    iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
+    iptables -I INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
+    iptables -I INPUT -p tcp --dport 888 -j ACCEPT 2>/dev/null || true
+    iptables -I INPUT -p tcp --dport 2083 -j ACCEPT 2>/dev/null || true
+fi
+
+chown -R www-data:www-data /var/www/phpmyadmin /var/www/html /var/www/dpanel-acme-challenge 2>/dev/null || true
+chmod 644 /var/www/phpmyadmin/config.inc.php /var/www/phpmyadmin/sso.php /var/www/phpmyadmin/signon_checker.php 2>/dev/null || true
 if command -v systemctl &>/dev/null; then
     systemctl restart php*-fpm php-fpm 2>/dev/null || true
-    systemctl restart nginx 2>/dev/null || true
+    nginx -t && systemctl restart nginx || systemctl restart nginx || true
 fi
 
 # ------------------------------------------------------------------------------
@@ -960,15 +1084,25 @@ fi
 # ------------------------------------------------------------------------------
 # 13. Display Access Credentials & Installation Summary
 # ------------------------------------------------------------------------------
-SERVER_IP=$(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1 || echo "YOUR_SERVER_IP")
+PUBLIC_IP=$(curl -s4m 3 https://api.ipify.org 2>/dev/null || curl -s4m 3 https://ifconfig.me 2>/dev/null || curl -s4m 3 https://icanhazip.com 2>/dev/null || true)
+INTERNAL_IP=$(ip -4 addr show scope global 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1 || echo "127.0.0.1")
+
+if [ -n "$PUBLIC_IP" ] && [[ "$PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    DISPLAY_IP="$PUBLIC_IP"
+else
+    DISPLAY_IP="$INTERNAL_IP"
+fi
 
 echo ""
 echo -e "${GREEN}==================================================================${NC}"
 echo -e "${GREEN}   dPanel Enterprise Installation Completed Successfully!        ${NC}"
 echo -e "${GREEN}==================================================================${NC}"
 echo ""
-echo -e "  Panel URL:        ${BLUE}http://${SERVER_IP}:2083${NC}"
-echo -e "  phpMyAdmin:       ${BLUE}http://${SERVER_IP}:888${NC}"
+echo -e "  Panel URL:        ${BLUE}http://${DISPLAY_IP}:2083${NC}"
+if [ "$DISPLAY_IP" != "$INTERNAL_IP" ] && [ -n "$INTERNAL_IP" ] && [ "$INTERNAL_IP" != "127.0.0.1" ]; then
+echo -e "  Internal URL:     ${BLUE}http://${INTERNAL_IP}:2083${NC}"
+fi
+echo -e "  phpMyAdmin:       ${BLUE}http://${DISPLAY_IP}:888${NC}"
 echo -e "  Username:         ${YELLOW}superadmin${NC}"
 echo -e "  Password:         ${YELLOW}${ADMIN_PASS}${NC}"
 echo ""

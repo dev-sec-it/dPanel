@@ -1,16 +1,15 @@
 {
-  "version": "1.0.0",
-  "release_name": "dPanel Enterprise Production Release",
-  "release_date": "2026-09-23",
+  "version": "1.0.1",
+  "release_name": "dPanel Enterprise Production Release v1.0.1",
+  "release_date": "2026-09-24",
   "changelog": [
-    "Single-Binary Self-Contained Architecture (Embedded React 19 UI & SQL migrations)",
-    "Node.js Multi-Version Manager (n) with 1-click install, active switch and uninstall",
-    "Full FileBrowser Web GUI with SSO token authentication on port 8082",
-    "Multi-PHP Runtime Engine (8.1 - 8.4) with isolated FPM pool management",
-    "Automated Let's Encrypt SSL generation & auto-renewal daemon",
-    "Pure-FTPd virtual user accounts & BIND9 DNS zone manager",
-    "Fail2ban intrusion defense & UFW stateful firewall port rules",
-    "Eliminated all browser native alert/confirm dialogs across the entire platform"
+    "Node.js & Next.js App Settings & Resource Tuning (Port, Entry, Limits, .env manager)",
+    "Automated Nginx Reverse Proxy & 1-Click Let's Encrypt SSL for Node Applications",
+    "Per-Application Node.js / NVM Runtime Interpreter Switcher",
+    "Direct GitHub In-Portal Update Center with Zero-Data-Loss In-Place Upgrade Engine",
+    "Live PM2 Stdout & Stderr Log Stream Inspector with Real-Time Tail Extraction",
+    "Streamlined Hosted Websites Table with Compact Icon-Only Action Toolbar",
+    "FileBrowser Auto-Fallback Directory Resolution with Inline Folder Creation"
   ],
   "download_url": "https://github.com/dev-sec-it/dPanel/releases/latest",
   "min_os_version": "Ubuntu 22.04 LTS, Debian 12, Alpine 3.19+"

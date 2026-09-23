@@ -74,7 +74,17 @@ fi
 if [ "$DO_CLEAN_REINSTALL" = true ]; then
     log_section "Performing Complete System Cleanup (Zero Residue)"
     
-    # 1. Stop and disable all previous dPanel & legacy services
+    # 1. Stop and kill all previous Node.js apps and PM2 processes
+    log_info "Stopping all previous Node.js and PM2 application processes..."
+    if command -v pm2 &>/dev/null; then
+        pm2 kill 2>/dev/null || true
+        pm2 cleardump 2>/dev/null || true
+    fi
+    pkill -9 node 2>/dev/null || true
+    pkill -9 pm2 2>/dev/null || true
+    rm -rf /root/.pm2 /home/*/.pm2 2>/dev/null || true
+
+    # 2. Stop and disable all previous dPanel & legacy services
     log_info "Stopping and disabling previous dPanel services..."
     if command -v systemctl &>/dev/null; then
         systemctl stop dpaneld dpanel-server filebrowser 2>/dev/null || true
@@ -91,7 +101,7 @@ if [ "$DO_CLEAN_REINSTALL" = true ]; then
         rm -f /etc/init.d/dpaneld /etc/init.d/dpanel-server
     fi
 
-    # 2. Clean previous PostgreSQL dpanel_db and roles
+    # 3. Clean previous PostgreSQL databases and roles
     log_info "Cleaning previous PostgreSQL database and roles..."
     if command -v su &>/dev/null; then
         su - postgres -s /bin/sh -c "psql -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'dpanel_db';\"" >/dev/null 2>&1 || true
@@ -99,19 +109,32 @@ if [ "$DO_CLEAN_REINSTALL" = true ]; then
         su - postgres -s /bin/sh -c "psql -c 'DROP USER IF EXISTS dpanel;'" >/dev/null 2>&1 || true
     fi
 
-    # 3. Clean previous MariaDB/MySQL internal DBA users and tables
-    log_info "Cleaning previous MariaDB internal state..."
+    # 4. Clean previous MariaDB/MySQL databases and users
+    log_info "Cleaning previous MariaDB databases and users..."
     if command -v mysql &>/dev/null; then
+        for db in $(mysql -u root -N -e "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys');" 2>/dev/null || true); do
+            mysql -u root -e "DROP DATABASE IF EXISTS \`${db}\`;" 2>/dev/null || true
+        done
         mysql -u root -e "DROP USER IF EXISTS 'dpanel_admin'@'localhost'; DROP USER IF EXISTS 'dpanel_admin'@'127.0.0.1'; FLUSH PRIVILEGES;" >/dev/null 2>&1 || true
     fi
 
-    # 4. Remove all previous dPanel files, directories, sockets, and configurations
+    # 5. Clean previous Nginx virtualhosts, sites, and SSL certificates
+    log_info "Cleaning previous Nginx virtualhosts, configurations, and SSL certificates..."
+    rm -rf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/* /etc/nginx/conf.d/* 2>/dev/null || true
+    rm -rf /etc/ssl/dpanel/* 2>/dev/null || true
+    rm -rf /var/www/dpanel-acme-challenge/* 2>/dev/null || true
+    rm -rf /etc/letsencrypt/live/* /etc/letsencrypt/archive/* /etc/letsencrypt/renewal/* 2>/dev/null || true
+
+    # 6. Clean website directories and hosted apps
+    log_info "Cleaning previous website document roots..."
+    rm -rf /www/wwwroot/* 2>/dev/null || true
+
+    # 7. Remove all previous dPanel files, directories, sockets, and configurations
     log_info "Removing previous configuration files, sockets, and binaries..."
     rm -rf /etc/dpanel
     rm -rf /var/dpanel/ipc /var/dpanel/ssl /run/dpanel /run/dpanel.sock
     rm -rf /var/log/dpanel
     rm -f /usr/local/bin/dpaneld /usr/local/bin/dpanel-server /usr/local/bin/filebrowser
-    rm -f /etc/nginx/conf.d/phpmyadmin.conf
     rm -rf /var/www/phpmyadmin/tmp/sessions
     rm -f /var/www/phpmyadmin/sso.php /var/www/phpmyadmin/signon_checker.php
 
@@ -869,11 +892,44 @@ cat > /var/www/html/index.html <<'HTMLEOF'
 </html>
 HTMLEOF
 
+# Generate default fallback self-signed SSL for Nginx default server
+mkdir -p /etc/ssl/dpanel/certs /etc/ssl/dpanel/private
+if [ ! -f /etc/ssl/dpanel/default.crt ] || [ ! -f /etc/ssl/dpanel/default.key ]; then
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout /etc/ssl/dpanel/default.key \
+        -out /etc/ssl/dpanel/default.crt \
+        -subj "/C=US/ST=State/L=City/O=dPanel/CN=localhost" 2>/dev/null || true
+    chmod 600 /etc/ssl/dpanel/default.key 2>/dev/null || true
+    chmod 644 /etc/ssl/dpanel/default.crt 2>/dev/null || true
+fi
+
 cat > /etc/nginx/sites-available/default.conf <<'DEFAULTCONF'
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
+    root /var/www/html;
+    index index.html index.php;
+
+    # ACME Challenge location
+    location /.well-known/acme-challenge/ {
+        root /var/www/dpanel-acme-challenge;
+        try_files $uri =404;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+    ssl_certificate /etc/ssl/dpanel/default.crt;
+    ssl_certificate_key /etc/ssl/dpanel/default.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
     root /var/www/html;
     index index.html index.php;
 

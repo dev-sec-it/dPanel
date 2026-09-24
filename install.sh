@@ -835,8 +835,8 @@ if [ -f /etc/nginx/nginx.conf ]; then
     fi
 fi
 
-# Remove duplicate default servers from conf.d
-rm -f /etc/nginx/conf.d/phpmyadmin.conf /etc/nginx/conf.d/default.conf /etc/nginx/sites-enabled/default 2>/dev/null || true
+# Remove duplicate default servers from conf.d and sites-available
+rm -f /etc/nginx/conf.d/phpmyadmin.conf /etc/nginx/conf.d/default.conf /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default 2>/dev/null || true
 
 # Provision Port 888 phpMyAdmin VHost
 cat > /etc/nginx/sites-available/phpmyadmin.conf <<NGINXCONF

@@ -63,8 +63,7 @@
   - [x] MySQL / MariaDB and MongoDB engine support
   - [x] 1-Click Database backup dump and instant restore
 - [x] **File Management & Object Storage**:
-  - [x] Built-in FileBrowser GUI daemon on port `8082` with Single Sign-On (SSO) JWT bridge
-  - [x] Direct API-driven file browser, editor, permissions manager, and file uploader
+  - [x] Native Pure Rust File Manager integrated inside dPanel UI with live editor, permissions, and multi-file uploader
   - [x] S3-compatible Object Storage Bucket manager
 - [x] **Network Infrastructure & Protocols**:
   - [x] Pure-FTPd Virtual FTP accounts with chrooted home directories
@@ -103,7 +102,7 @@
 | **Frontend UI** | React 19, TypeScript, Tailwind CSS, Vite, Lucide Icons (Single Light Theme) |
 | **App Runtimes** | Node.js Multi-Version (`n`), PM2 Process Supervisor, Multi-PHP (8.1 - 8.4 FPM) |
 | **Web & Proxy** | Nginx High-Performance Web Server, Let's Encrypt Automated SSL (ACME / Certbot) |
-| **File Management** | Integrated FileBrowser Daemon on Port `8082` with Single Sign-On (SSO) JWT Bridge |
+| **File Management** | Native Pure Rust File Manager integrated inside Web Control Plane (Port 2083) |
 | **Containers & DNS** | Docker Engine API, BIND9 Named DNS Engine, Pure-FTPd Virtual Accounts |
 | **Security Suite** | Fail2ban Intrusion Defense, UFW / Iptables Port Rules, Argon2id Password Hashing |
 
@@ -124,8 +123,8 @@ dPanel Enterprise is strictly validated and optimized for 64-bit Linux architect
 ```text
 deploy/
 ├── bin/
-│   ├── dpanel-server   # 15.4 MB — Standalone Web Server + Embedded UI + SQL Migrations
-│   └── dpaneld         # 3.4 MB  — Privileged System Supervisor & IPC Daemon
+│   ├── dpanel-server   # Standalone Web Server + Embedded UI + SQL Migrations
+│   └── dpaneld         # Privileged System Supervisor & IPC Daemon
 ├── install.sh          # Enterprise Automated 1-Click Installer (< 30s Execution)
 └── README.md           # Production Deployment Guide & Documentation
 ```
@@ -166,8 +165,8 @@ Ensure the following inbound ports are open in your cloud provider security grou
 
 | Port | Protocol | Purpose |
 | :--- | :--- | :--- |
-| **`2083`** | TCP | dPanel Web Control Plane & REST API |
-| **`8082`** | TCP | FileBrowser Web File Manager (SSO Integrated) |
+| **`2083`** | TCP | dPanel Web Control Plane, UI & REST API |
+| **`888`** | TCP | phpMyAdmin 1-Click SSO Web GUI |
 | **`80`** | TCP | HTTP Web Traffic / ACME SSL Challenge |
 | **`443`** | TCP | HTTPS Web Traffic (Nginx SSL Reverse Proxy) |
 | **`21` / `20`** | TCP | Pure-FTPd FTP Control & Passive Data Ports (30000-31000) |

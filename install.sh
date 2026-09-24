@@ -52,8 +52,21 @@ if [ -f "/usr/local/bin/dpaneld" ] || [ -f "/usr/local/bin/dpanel-server" ] || [
 fi
 
 DO_CLEAN_REINSTALL=false
+DO_PURGE_PACKAGES=false
 
-if [ "$DPANEL_EXISTING" = true ]; then
+for arg in "$@"; do
+    case "$arg" in
+        --purge|--purge-all|--deep-clean)
+            DO_CLEAN_REINSTALL=true
+            DO_PURGE_PACKAGES=true
+            ;;
+        --fresh|--clean|--reinstall|-f)
+            DO_CLEAN_REINSTALL=true
+            ;;
+    esac
+done
+
+if [ "$DPANEL_EXISTING" = true ] && [ "$DO_CLEAN_REINSTALL" = false ]; then
     if [ "${DPANEL_FORCE_REINSTALL:-0}" = "1" ]; then
         DO_CLEAN_REINSTALL=true
     elif [ -t 0 ]; then
@@ -68,13 +81,16 @@ if [ "$DPANEL_EXISTING" = true ]; then
             log_warn "Installation cancelled. Existing installation retained."
             exit 0
         fi
+    else
+        # In automated piped installations, default to clean fresh install
+        DO_CLEAN_REINSTALL=true
     fi
 fi
 
 if [ "$DO_CLEAN_REINSTALL" = true ]; then
     log_section "Performing Complete System Cleanup (Zero Residue)"
     
-    # 1. Stop and kill all previous Node.js apps and PM2 processes
+    # 1. Stop and kill all previous Node.js apps, PM2, and NVM processes
     log_info "Stopping all previous Node.js and PM2 application processes..."
     if command -v pm2 &>/dev/null; then
         pm2 kill 2>/dev/null || true
@@ -82,16 +98,17 @@ if [ "$DO_CLEAN_REINSTALL" = true ]; then
     fi
     pkill -9 node 2>/dev/null || true
     pkill -9 pm2 2>/dev/null || true
-    rm -rf /root/.pm2 /home/*/.pm2 2>/dev/null || true
+    rm -rf /root/.pm2 /home/*/.pm2 /root/.npm /home/*/.npm /root/.nvm /home/*/.nvm 2>/dev/null || true
 
     # 2. Stop and disable all previous dPanel & legacy services
     log_info "Stopping and disabling previous dPanel services..."
     if command -v systemctl &>/dev/null; then
-        systemctl stop dpaneld dpanel-server filebrowser 2>/dev/null || true
+        systemctl stop dpaneld dpanel-server filebrowser nginx mariadb mysql postgresql redis-server redis pure-ftpd bind9 named 2>/dev/null || true
         systemctl disable dpaneld dpanel-server filebrowser 2>/dev/null || true
         rm -f /etc/systemd/system/dpaneld.service \
               /etc/systemd/system/dpanel-server.service \
-              /etc/systemd/system/filebrowser.service
+              /etc/systemd/system/filebrowser.service \
+              /etc/systemd/system/multi-user.target.wants/dpanel*
         systemctl daemon-reload 2>/dev/null || true
     elif command -v rc-service &>/dev/null; then
         rc-service dpaneld stop 2>/dev/null || true
@@ -101,8 +118,8 @@ if [ "$DO_CLEAN_REINSTALL" = true ]; then
         rm -f /etc/init.d/dpaneld /etc/init.d/dpanel-server
     fi
 
-    # 3. Clean previous PostgreSQL databases and roles
-    log_info "Cleaning previous PostgreSQL database and roles..."
+    # 3. Clean previous PostgreSQL databases, clusters, and roles
+    log_info "Cleaning previous PostgreSQL database, clusters, and roles..."
     if command -v su &>/dev/null; then
         su - postgres -s /bin/sh -c "psql -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'dpanel_db';\"" >/dev/null 2>&1 || true
         su - postgres -s /bin/sh -c "psql -c 'DROP DATABASE IF EXISTS dpanel_db;'" >/dev/null 2>&1 || true
@@ -123,20 +140,35 @@ if [ "$DO_CLEAN_REINSTALL" = true ]; then
     rm -rf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/* /etc/nginx/conf.d/* 2>/dev/null || true
     rm -rf /etc/ssl/dpanel/* 2>/dev/null || true
     rm -rf /var/www/dpanel-acme-challenge/* 2>/dev/null || true
-    rm -rf /etc/letsencrypt/live/* /etc/letsencrypt/archive/* /etc/letsencrypt/renewal/* 2>/dev/null || true
+    rm -rf /etc/letsencrypt/live/* /etc/letsencrypt/archive/* /etc/letsencrypt/renewal/* /etc/letsencrypt 2>/dev/null || true
 
-    # 6. Clean website directories and hosted apps
-    log_info "Cleaning previous website document roots..."
-    rm -rf /www/wwwroot/* 2>/dev/null || true
+    # 6. Clean website directories, phpMyAdmin, and hosted apps
+    log_info "Cleaning previous website document roots and phpMyAdmin..."
+    rm -rf /www/wwwroot/* /www/wwwroot /var/www/html/* /var/www/phpmyadmin /run/php/* 2>/dev/null || true
 
     # 7. Remove all previous dPanel files, directories, sockets, and configurations
     log_info "Removing previous configuration files, sockets, and binaries..."
-    rm -rf /etc/dpanel
-    rm -rf /var/dpanel/ipc /var/dpanel/ssl /run/dpanel /run/dpanel.sock
-    rm -rf /var/log/dpanel
-    rm -f /usr/local/bin/dpaneld /usr/local/bin/dpanel-server /usr/local/bin/filebrowser
-    rm -rf /var/www/phpmyadmin/tmp/sessions
-    rm -f /var/www/phpmyadmin/sso.php /var/www/phpmyadmin/signon_checker.php
+    rm -rf /etc/dpanel /var/dpanel /run/dpanel /run/dpanel.sock /var/log/dpanel /tmp/dpanel* /tmp/dpanel_install /tmp/pma.tar.gz 2>/dev/null || true
+    rm -f /usr/local/bin/dpaneld /usr/local/bin/dpanel-server /usr/local/bin/filebrowser 2>/dev/null || true
+    rm -rf /etc/bind/zones /etc/bind/named.conf.local /etc/pure-ftpd/pureftpd.pdb /etc/pure-ftpd/passwd /etc/pure-ftpd/conf 2>/dev/null || true
+
+    # 8. Complete package uninstall & purge (Node.js, PM2, MariaDB, MySQL, PostgreSQL, PHP, Nginx, Redis, Pure-FTPd, BIND9, Certbot)
+    log_info "Uninstalling and purging previous runtime packages (Node.js, PM2, MariaDB, MySQL, PostgreSQL, PHP, Nginx, Redis, Pure-FTPd, BIND9, Certbot)..."
+    if command -v pm2 &>/dev/null; then
+        pm2 kill 2>/dev/null || true
+        pm2 cleardump 2>/dev/null || true
+    fi
+    if command -v npm &>/dev/null; then
+        npm uninstall -g pm2 2>/dev/null || true
+    fi
+    if command -v apt-get &>/dev/null; then
+        apt-get purge -y mariadb-server mariadb-client mysql-common postgresql* php* nginx* nodejs npm redis-server redis pure-ftpd bind9 bind9-utils certbot python3-certbot-nginx 2>/dev/null || true
+        apt-get autoremove -y --purge 2>/dev/null || true
+        rm -rf /etc/mysql /etc/php /etc/nginx /etc/redis /etc/bind /etc/pure-ftpd /var/lib/mysql /var/lib/postgresql /var/lib/redis /var/log/nginx /var/log/mysql /var/log/redis /var/log/postgresql 2>/dev/null || true
+    elif command -v apk &>/dev/null; then
+        apk del postgresql16 mariadb php83-fpm nginx nodejs npm redis pure-ftpd bind certbot 2>/dev/null || true
+        rm -rf /etc/mysql /etc/php /etc/nginx /var/lib/mysql /var/lib/postgresql /var/lib/redis /var/www/phpmyadmin 2>/dev/null || true
+    fi
 
     log_info "Cleanup complete. Ready for clean fresh installation."
 fi
@@ -1002,12 +1034,6 @@ ENVEOF
 
 chmod 600 /etc/dpanel/.env
 
-# Clean up any legacy filebrowser services if present
-if command -v systemctl &>/dev/null; then
-    systemctl stop filebrowser 2>/dev/null || true
-    systemctl disable filebrowser 2>/dev/null || true
-    rm -f /etc/systemd/system/filebrowser.service /usr/local/bin/filebrowser
-fi
 
 # ------------------------------------------------------------------------------
 # 10. Configure System Services (systemd / OpenRC)

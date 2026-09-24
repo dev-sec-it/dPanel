@@ -103,11 +103,10 @@ if [ "$DO_CLEAN_REINSTALL" = true ]; then
     # 2. Stop and disable all previous dPanel & legacy services
     log_info "Stopping and disabling previous dPanel services..."
     if command -v systemctl &>/dev/null; then
-        systemctl stop dpaneld dpanel-server filebrowser nginx mariadb mysql postgresql redis-server redis pure-ftpd bind9 named 2>/dev/null || true
-        systemctl disable dpaneld dpanel-server filebrowser 2>/dev/null || true
+        systemctl stop dpaneld dpanel-server nginx mariadb mysql postgresql redis-server redis pure-ftpd bind9 named 2>/dev/null || true
+        systemctl disable dpaneld dpanel-server 2>/dev/null || true
         rm -f /etc/systemd/system/dpaneld.service \
               /etc/systemd/system/dpanel-server.service \
-              /etc/systemd/system/filebrowser.service \
               /etc/systemd/system/multi-user.target.wants/dpanel*
         systemctl daemon-reload 2>/dev/null || true
     elif command -v rc-service &>/dev/null; then
@@ -149,7 +148,7 @@ if [ "$DO_CLEAN_REINSTALL" = true ]; then
     # 7. Remove all previous dPanel files, directories, sockets, and configurations
     log_info "Removing previous configuration files, sockets, and binaries..."
     rm -rf /etc/dpanel /var/dpanel /run/dpanel /run/dpanel.sock /var/log/dpanel /tmp/dpanel* /tmp/dpanel_install /tmp/pma.tar.gz 2>/dev/null || true
-    rm -f /usr/local/bin/dpaneld /usr/local/bin/dpanel-server /usr/local/bin/filebrowser 2>/dev/null || true
+    rm -f /usr/local/bin/dpaneld /usr/local/bin/dpanel-server 2>/dev/null || true
     rm -rf /etc/bind/zones /etc/bind/named.conf.local /etc/pure-ftpd/pureftpd.pdb /etc/pure-ftpd/passwd /etc/pure-ftpd/conf 2>/dev/null || true
 
     # 8. Complete package uninstall & purge (Node.js, PM2, MariaDB, MySQL, PostgreSQL, PHP, Nginx, Redis, Pure-FTPd, BIND9, Certbot)
@@ -379,14 +378,14 @@ SRC_DPANELD=""
 SRC_SERVER=""
 
 for candidate_dir in \
+    "${SCRIPT_DIR}/target/release" \
+    "/opt/dpanel-src/target/release" \
     "${SCRIPT_DIR}/bin/${ARCH_SUBDIR}" \
     "${SCRIPT_DIR}/bin/${HOST_ARCH}" \
     "${SCRIPT_DIR}/bin" \
-    "${SCRIPT_DIR}/target/release" \
     "${SCRIPT_DIR}/dist/bin" \
     "/opt/dpanel-src/bin/${ARCH_SUBDIR}" \
     "/opt/dpanel-src/bin" \
-    "/opt/dpanel-src/target/release" \
     "/tmp/dpanel/bin" \
     "/tmp/dpanel_install/bin"; do
     if [ -f "${candidate_dir}/dpaneld" ] && [ -f "${candidate_dir}/dpanel-server" ]; then

@@ -1,15 +1,17 @@
 {
-  "version": "1.0.1",
-  "release_name": "dPanel Enterprise Production Release v1.0.1",
+  "version": "1.0.2",
+  "release_name": "dPanel Enterprise Production Release v1.0.2",
   "release_date": "2026-09-24",
   "changelog": [
+    "Fixed Nginx VHost HTTP/2 directive compatibility across all Nginx versions (1.18 - 1.26+)",
+    "Enhanced atomic virtualhost symlink creation and live syntax rollback protection",
+    "Prioritized index.php over placeholder index.html in document root routing",
+    "Integrated safe raw virtualhost editor with automated syntax verification and reloading",
     "Node.js & Next.js App Settings & Resource Tuning (Port, Entry, Limits, .env manager)",
     "Automated Nginx Reverse Proxy & 1-Click Let's Encrypt SSL for Node Applications",
     "Per-Application Node.js / NVM Runtime Interpreter Switcher",
     "Direct GitHub In-Portal Update Center with Zero-Data-Loss In-Place Upgrade Engine",
-    "Live PM2 Stdout & Stderr Log Stream Inspector with Real-Time Tail Extraction",
-    "Streamlined Hosted Websites Table with Compact Icon-Only Action Toolbar",
-    "In-Portal File Manager & Code Editor with Auto-Fallback Directory Resolution and Inline Folder Creation"
+    "Live PM2 Stdout & Stderr Log Stream Inspector with Real-Time Tail Extraction"
   ],
   "download_url": "https://github.com/dev-sec-it/dPanel/releases/latest",
   "min_os_version": "Ubuntu 22.04 LTS, Debian 12, Alpine 3.19+"

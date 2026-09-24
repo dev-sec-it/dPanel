@@ -825,6 +825,16 @@ ln -sf "$PHP_SOCK" /run/php/php-fpm.sock 2>/dev/null || true
 mkdir -p /etc/nginx/conf.d /etc/nginx/sites-available /etc/nginx/sites-enabled /var/www/html /www/wwwroot /var/www/dpanel-acme-challenge
 chmod 777 /var/www/dpanel-acme-challenge 2>/dev/null || true
 
+# Ensure nginx.conf includes sites-enabled
+if [ -f /etc/nginx/nginx.conf ]; then
+    if ! grep -q "sites-enabled" /etc/nginx/nginx.conf; then
+        sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf 2>/dev/null || true
+    fi
+    if ! grep -q "server_names_hash_bucket_size" /etc/nginx/nginx.conf; then
+        sed -i '/http {/a \    server_names_hash_bucket_size 128;' /etc/nginx/nginx.conf 2>/dev/null || true
+    fi
+fi
+
 # Remove duplicate default servers from conf.d
 rm -f /etc/nginx/conf.d/phpmyadmin.conf /etc/nginx/conf.d/default.conf /etc/nginx/sites-enabled/default 2>/dev/null || true
 

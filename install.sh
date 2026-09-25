@@ -247,14 +247,10 @@ exit 0
 EOF
     fi
     chmod 755 /etc/mysql/debian-start 2>/dev/null || true
-    export DEBIAN_FRONTEND=noninteractive
-    rm -f /etc/mysql/mariadb.cnf /etc/mysql/my.cnf 2>/dev/null || true
-    dpkg --configure -a --force-confdef --force-confold 2>/dev/null || true
+    dpkg --configure -a 2>/dev/null || true
 
     apt-get update -y -q 2>/dev/null || apt-get update -y || true
     if ! apt-get install -y --no-install-recommends \
-        -o Dpkg::Options::="--force-confdef" \
-        -o Dpkg::Options::="--force-confold" \
         postgresql \
         postgresql-contrib \
         libpq5 \
@@ -278,11 +274,11 @@ EOF
         bash \
         procps; then
         log_warn "Fixing dpkg package dependencies and retrying..."
-        dpkg --configure -a --force-confdef --force-confold || true
-        apt-get install -f -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+        touch /etc/mysql/mariadb.cnf
+        chmod 644 /etc/mysql/mariadb.cnf
+        dpkg --configure -a || true
+        apt-get install -f -y
         apt-get install -y --no-install-recommends \
-            -o Dpkg::Options::="--force-confdef" \
-            -o Dpkg::Options::="--force-confold" \
             postgresql \
             postgresql-contrib \
             libpq5 \
@@ -348,9 +344,6 @@ mkdir -p /etc/dpanel
 mkdir -p /run/dpanel
 mkdir -p /var/www/phpmyadmin
 mkdir -p /var/www/phpmyadmin/tmp
-mkdir -p /var/www/dpanel-acme-challenge
-mkdir -p /etc/ssl/dpanel/certs
-mkdir -p /etc/ssl/dpanel/private
 mkdir -p /etc/nginx/conf.d
 
 chmod 755 /var/dpanel
@@ -359,25 +352,25 @@ chmod 777 /var/dpanel/ipc
 chmod 755 /run/dpanel
 chmod 700 /etc/dpanel
 chmod 777 /var/www/phpmyadmin/tmp
-chmod 777 /var/www/dpanel-acme-challenge
-chmod 755 /etc/ssl/dpanel/certs
-chmod 700 /etc/ssl/dpanel/private
 
 # ------------------------------------------------------------------------------
-# 6. Production Binary Deployment (Multi-Architecture Auto-Detection)
+# 6. Multi-Architecture Binary Resolution & Deployment
 # ------------------------------------------------------------------------------
-log_info "Deploying dPanel core production binaries..."
+log_info "Deploying dPanel core binaries..."
 
 HOST_ARCH="$(uname -m)"
 case "$HOST_ARCH" in
-    aarch64|arm64)
-        ARCH_SUBDIR="aarch64"
-        ;;
-    x86_64|amd64)
+    x86_64|amd64) 
         ARCH_SUBDIR="x86_64"
+        ARCH_PATTERN="x86-64|x86_64|AMD64"
         ;;
-    *)
+    aarch64|arm64) 
+        ARCH_SUBDIR="aarch64"
+        ARCH_PATTERN="aarch64|ARM aarch64|ARM64"
+        ;;
+    *) 
         ARCH_SUBDIR="$HOST_ARCH"
+        ARCH_PATTERN="$HOST_ARCH"
         ;;
 esac
 
@@ -385,34 +378,87 @@ SRC_DPANELD=""
 SRC_SERVER=""
 
 for candidate_dir in \
-    "${SCRIPT_DIR}/bin/${ARCH_SUBDIR}" \
-    "${SCRIPT_DIR}/bin" \
     "${SCRIPT_DIR}/target/release" \
+    "/opt/dpanel-src/target/release" \
+    "${SCRIPT_DIR}/bin/${ARCH_SUBDIR}" \
+    "${SCRIPT_DIR}/bin/${HOST_ARCH}" \
+    "${SCRIPT_DIR}/bin" \
+    "${SCRIPT_DIR}/dist/bin" \
     "/opt/dpanel-src/bin/${ARCH_SUBDIR}" \
     "/opt/dpanel-src/bin" \
-    "/tmp/dpanel/bin"; do
+    "/tmp/dpanel/bin" \
+    "/tmp/dpanel_install/bin"; do
     if [ -f "${candidate_dir}/dpaneld" ] && [ -f "${candidate_dir}/dpanel-server" ]; then
-        if command -v file &>/dev/null; then
-            if [ "$ARCH_SUBDIR" = "aarch64" ] && ! file -b "${candidate_dir}/dpaneld" | grep -Eqi "aarch64|ARM"; then
-                continue
+        chmod 755 "${candidate_dir}/dpaneld" "${candidate_dir}/dpanel-server" 2>/dev/null || true
+        
+        # Verify architecture via static inspection without starting daemon loop
+        IS_VALID_ARCH=false
+        if [ "${candidate_dir}" = "${SCRIPT_DIR}/bin/${ARCH_SUBDIR}" ] || [ "${candidate_dir}" = "/opt/dpanel-src/bin/${ARCH_SUBDIR}" ]; then
+            IS_VALID_ARCH=true
+        elif command -v file &>/dev/null; then
+            if file -b "${candidate_dir}/dpaneld" 2>/dev/null | grep -Eqi "$ARCH_PATTERN"; then
+                IS_VALID_ARCH=true
             fi
-            if [ "$ARCH_SUBDIR" = "x86_64" ] && ! file -b "${candidate_dir}/dpaneld" | grep -Eqi "x86-64|x86_64|AMD64"; then
-                continue
+        elif command -v readelf &>/dev/null; then
+            if readelf -h "${candidate_dir}/dpaneld" 2>/dev/null | grep -Eqi "$ARCH_PATTERN"; then
+                IS_VALID_ARCH=true
             fi
+        else
+            IS_VALID_ARCH=true
         fi
-        SRC_DPANELD="${candidate_dir}/dpaneld"
-        SRC_SERVER="${candidate_dir}/dpanel-server"
-        break
+
+        if [ "$IS_VALID_ARCH" = true ]; then
+            SRC_DPANELD="${candidate_dir}/dpaneld"
+            SRC_SERVER="${candidate_dir}/dpanel-server"
+            break
+        fi
     fi
 done
 
+# If no compatible pre-built binary matches host architecture, build natively from source
+if [ -z "$SRC_DPANELD" ] || [ -z "$SRC_SERVER" ]; then
+    BUILD_ROOT=""
+    if [ -f "${SCRIPT_DIR}/Cargo.toml" ]; then
+        BUILD_ROOT="${SCRIPT_DIR}"
+    elif [ -f "/opt/dpanel-src/Cargo.toml" ]; then
+        BUILD_ROOT="/opt/dpanel-src"
+    fi
+
+    if [ -n "$BUILD_ROOT" ]; then
+        log_info "No pre-built binary matching architecture ${HOST_ARCH}. Compiling native production binaries with Cargo..."
+        if [ "$PKG_MANAGER" = "apt" ]; then
+            apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev libpq-dev curl 2>/dev/null || true
+        elif [ "$PKG_MANAGER" = "apk" ]; then
+            apk add --no-cache build-base pkgconf openssl-dev postgresql-dev curl 2>/dev/null || true
+        fi
+
+        if ! command -v cargo &>/dev/null; then
+            log_info "Setting up minimal Rust compiler toolchain..."
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal >/dev/null 2>&1 || true
+            export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
+        fi
+
+        export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
+        if command -v cargo &>/dev/null; then
+            (cd "$BUILD_ROOT" && cargo build --release)
+            if [ -f "${BUILD_ROOT}/target/release/dpaneld" ] && [ -f "${BUILD_ROOT}/target/release/dpanel-server" ]; then
+                SRC_DPANELD="${BUILD_ROOT}/target/release/dpaneld"
+                SRC_SERVER="${BUILD_ROOT}/target/release/dpanel-server"
+                mkdir -p "${SCRIPT_DIR}/bin/${ARCH_SUBDIR}" 2>/dev/null || true
+                cp "$SRC_DPANELD" "${SCRIPT_DIR}/bin/${ARCH_SUBDIR}/dpaneld" 2>/dev/null || true
+                cp "$SRC_SERVER" "${SCRIPT_DIR}/bin/${ARCH_SUBDIR}/dpanel-server" 2>/dev/null || true
+            fi
+        fi
+    fi
+fi
+
 if [ -n "$SRC_DPANELD" ] && [ -n "$SRC_SERVER" ]; then
-    log_info "Installing binaries for ${HOST_ARCH} from ${SRC_DPANELD%/*}..."
-    cp -f "$SRC_DPANELD" /usr/local/bin/dpaneld
-    cp -f "$SRC_SERVER" /usr/local/bin/dpanel-server
+    log_info "Installing binaries from ${SRC_DPANELD%/*}..."
+    cp "$SRC_DPANELD" /usr/local/bin/dpaneld
+    cp "$SRC_SERVER" /usr/local/bin/dpanel-server
     chmod 755 /usr/local/bin/dpaneld /usr/local/bin/dpanel-server
 else
-    log_error "dPanel production binaries for architecture ${HOST_ARCH} not found in ${SCRIPT_DIR}/bin."
+    log_error "Compatible dPanel binaries (dpanel-server, dpaneld) for ${HOST_ARCH} not found and compilation failed."
     exit 1
 fi
 
@@ -575,7 +621,7 @@ else
     log_warn "MariaDB is starting up. Check status with: systemctl status mariadb"
 fi
 
-if [ ! -f "/var/www/phpmyadmin/index.php" ]; then
+if [ ! -f "/var/www/phpmyadmin/index.php" ] || [ ! -f "/var/www/phpmyadmin/vendor/autoload.php" ]; then
     curl -sSL https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.tar.gz -o /tmp/pma.tar.gz 2>/dev/null || true
     if [ -f /tmp/pma.tar.gz ]; then
         tar -xzf /tmp/pma.tar.gz --strip-components=1 -C /var/www/phpmyadmin
@@ -844,6 +890,7 @@ server {
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         fastcgi_param PATH_INFO \$fastcgi_path_info;
+        fastcgi_param PHP_ADMIN_VALUE "open_basedir=/var/www/phpmyadmin/:/tmp/:/proc/:/dev/urandom";
         fastcgi_read_timeout 300;
         fastcgi_buffer_size 128k;
         fastcgi_buffers 4 256k;
@@ -980,8 +1027,6 @@ DATABASE_URL="postgres://dpanel:dpanel_secure_password@127.0.0.1:5432/dpanel_db"
 JWT_SECRET="${JWT_SECRET}"
 IPC_SOCKET_PATH="/run/dpanel.sock"
 DAEMON_SOCKET="/run/dpanel.sock"
-SSL_CERTS_DIR="/etc/ssl/dpanel/certs"
-SSL_KEYS_DIR="/etc/ssl/dpanel/private"
 INITIAL_ADMIN_USERNAME="superadmin"
 INITIAL_ADMIN_EMAIL="admin@dpanel.enterprise"
 INITIAL_ADMIN_PASSWORD="${ADMIN_PASS}"

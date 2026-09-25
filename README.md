@@ -5,7 +5,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.78%2B-black?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
 [![React](https://img.shields.io/badge/React-19.0-61dafb?style=for-the-badge&logo=react)](https://react.dev/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791?style=for-the-badge&logo=postgresql)](https://www.postgresql.org/)
-[![License](https://img.shields.io/badge/License-Proprietary%20%2F%20Open%20Source%20Target-green?style=for-the-badge)](https://github.com/devsecit/dPanel)
+[![License](https://img.shields.io/badge/License-Proprietary%20%2F%20Open%20Source%20Target-green?style=for-the-badge)](https://github.com/dev-sec-it/dPanel)
 
 > **Open Source Milestone**: This enterprise cloud panel was engineered by **DEV SEC IT**. The complete codebase will be released under a fully permissive open-source license once the repository reaches **100 GitHub Stars (100 ⭐)**!
 
@@ -138,7 +138,7 @@ deploy/
 ```bash
 # Clone the deployment package to your server
 cd /opt
-git clone https://github.com/devsecit/dPanel.git
+git clone https://github.com/dev-sec-it/dPanel.git
 cd dPanel/deploy
 ```
 
@@ -217,7 +217,7 @@ Alternatively, restart `dpanel-server` after updating `INITIAL_ADMIN_PASSWORD` i
 **DEV SEC IT** is a specialized cybersecurity and enterprise software engineering collective dedicated to building hardened, scalable, and developer-centric infrastructure solutions.
 
 - **Website**: [https://devsecit.com](https://devsecit.com)
-- **GitHub**: [https://github.com/devsecit](https://github.com/devsecit)
+- **GitHub**: [https://github.com/dev-sec-it](https://github.com/dev-sec-it)
 - **Community & Support**: [devsecit.com/contact](https://devsecit.com/contact)
 
 ---

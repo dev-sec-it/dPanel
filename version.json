@@ -1,6 +1,6 @@
 {
-  "version": "1.0.6",
-  "release_name": "dPanel Enterprise Production Release v1.0.6",
+  "version": "1.0.7",
+  "release_name": "dPanel Enterprise Production Release v1.0.7",
   "release_date": "2026-09-25",
   "changelog": [
     "Anti-Brute-Force Login Defense: Automatic 5-minute block on 3 wrong credentials, 1-hour block on repeat violations",
@@ -12,6 +12,6 @@
     "Hardened Nginx rate-limiting zone synchronization with zero-downtime reload",
     "Zero-Data-Loss safe in-place upgrade engine preserving all databases, sites, and credentials"
   ],
-  "download_url": "https://github.com/devsecit/dPanel/releases/latest",
+  "download_url": "https://github.com/dev-sec-it/dPanel/releases/latest",
   "min_os_version": "Ubuntu 22.04 LTS, Debian 12, Alpine 3.19+"
 }

@@ -360,20 +360,42 @@ chmod 755 /etc/ssl/dpanel/certs
 chmod 700 /etc/ssl/dpanel/private
 
 # ------------------------------------------------------------------------------
-# 6. Production Binary Deployment (Single Standard Architecture)
+# 6. Production Binary Deployment (Multi-Architecture Auto-Detection)
 # ------------------------------------------------------------------------------
 log_info "Deploying dPanel core production binaries..."
+
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+    aarch64|arm64)
+        ARCH_SUBDIR="aarch64"
+        ;;
+    x86_64|amd64)
+        ARCH_SUBDIR="x86_64"
+        ;;
+    *)
+        ARCH_SUBDIR="$HOST_ARCH"
+        ;;
+esac
 
 SRC_DPANELD=""
 SRC_SERVER=""
 
 for candidate_dir in \
+    "${SCRIPT_DIR}/bin/${ARCH_SUBDIR}" \
     "${SCRIPT_DIR}/bin" \
     "${SCRIPT_DIR}/target/release" \
+    "/opt/dpanel-src/bin/${ARCH_SUBDIR}" \
     "/opt/dpanel-src/bin" \
-    "/opt/dpanel-src/target/release" \
     "/tmp/dpanel/bin"; do
     if [ -f "${candidate_dir}/dpaneld" ] && [ -f "${candidate_dir}/dpanel-server" ]; then
+        if command -v file &>/dev/null; then
+            if [ "$ARCH_SUBDIR" = "aarch64" ] && ! file -b "${candidate_dir}/dpaneld" | grep -Eqi "aarch64|ARM"; then
+                continue
+            fi
+            if [ "$ARCH_SUBDIR" = "x86_64" ] && ! file -b "${candidate_dir}/dpaneld" | grep -Eqi "x86-64|x86_64|AMD64"; then
+                continue
+            fi
+        fi
         SRC_DPANELD="${candidate_dir}/dpaneld"
         SRC_SERVER="${candidate_dir}/dpanel-server"
         break
@@ -381,12 +403,12 @@ for candidate_dir in \
 done
 
 if [ -n "$SRC_DPANELD" ] && [ -n "$SRC_SERVER" ]; then
-    log_info "Installing binaries from ${SRC_DPANELD%/*}..."
+    log_info "Installing binaries for ${HOST_ARCH} from ${SRC_DPANELD%/*}..."
     cp -f "$SRC_DPANELD" /usr/local/bin/dpaneld
     cp -f "$SRC_SERVER" /usr/local/bin/dpanel-server
     chmod 755 /usr/local/bin/dpaneld /usr/local/bin/dpanel-server
 else
-    log_error "dPanel production binaries (dpanel-server, dpaneld) not found in ${SCRIPT_DIR}/bin."
+    log_error "dPanel production binaries for architecture ${HOST_ARCH} not found in ${SCRIPT_DIR}/bin."
     exit 1
 fi
 

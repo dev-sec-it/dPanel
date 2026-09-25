@@ -344,6 +344,9 @@ mkdir -p /etc/dpanel
 mkdir -p /run/dpanel
 mkdir -p /var/www/phpmyadmin
 mkdir -p /var/www/phpmyadmin/tmp
+mkdir -p /var/www/dpanel-acme-challenge
+mkdir -p /etc/ssl/dpanel/certs
+mkdir -p /etc/ssl/dpanel/private
 mkdir -p /etc/nginx/conf.d
 
 chmod 755 /var/dpanel
@@ -352,6 +355,9 @@ chmod 777 /var/dpanel/ipc
 chmod 755 /run/dpanel
 chmod 700 /etc/dpanel
 chmod 777 /var/www/phpmyadmin/tmp
+chmod 777 /var/www/dpanel-acme-challenge
+chmod 755 /etc/ssl/dpanel/certs
+chmod 700 /etc/ssl/dpanel/private
 
 # ------------------------------------------------------------------------------
 # 6. Multi-Architecture Binary Resolution & Deployment
@@ -1026,6 +1032,8 @@ DATABASE_URL="postgres://dpanel:dpanel_secure_password@127.0.0.1:5432/dpanel_db"
 JWT_SECRET="${JWT_SECRET}"
 IPC_SOCKET_PATH="/run/dpanel.sock"
 DAEMON_SOCKET="/run/dpanel.sock"
+SSL_CERTS_DIR="/etc/ssl/dpanel/certs"
+SSL_KEYS_DIR="/etc/ssl/dpanel/private"
 INITIAL_ADMIN_USERNAME="superadmin"
 INITIAL_ADMIN_EMAIL="admin@dpanel.enterprise"
 INITIAL_ADMIN_PASSWORD="${ADMIN_PASS}"

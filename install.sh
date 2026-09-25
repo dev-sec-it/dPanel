@@ -67,24 +67,10 @@ for arg in "$@"; do
 done
 
 if [ "$DPANEL_EXISTING" = true ] && [ "$DO_CLEAN_REINSTALL" = false ]; then
-    if [ "${DPANEL_FORCE_REINSTALL:-0}" = "1" ]; then
-        DO_CLEAN_REINSTALL=true
-    elif [ -t 0 ]; then
-        log_section "Existing dPanel Installation Detected"
-        log_warn "A previous dPanel installation was found on this server."
-        echo ""
-        read -r -p "  Do you want to wipe previous data and perform a clean fresh install? [y/N]: " CONFIRM_UNINSTALL
-        echo ""
-        if [[ "$CONFIRM_UNINSTALL" =~ ^[Yy]$ ]]; then
-            DO_CLEAN_REINSTALL=true
-        else
-            log_warn "Installation cancelled. Existing installation retained."
-            exit 0
-        fi
-    else
-        # In automated piped installations, default to clean fresh install
-        DO_CLEAN_REINSTALL=true
-    fi
+    log_section "Existing dPanel Installation Detected - Performing Safe In-Place Upgrade"
+    log_info "Preserving existing databases (PostgreSQL & MariaDB), websites, and panel credentials."
+    log_info "Upgrading system binaries to latest version with zero data loss..."
+    DO_CLEAN_REINSTALL=false
 fi
 
 if [ "$DO_CLEAN_REINSTALL" = true ]; then
@@ -1028,10 +1014,16 @@ fi
 # ------------------------------------------------------------------------------
 log_info "Configuring environment and credentials..."
 
-ADMIN_PASS=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 20)
-JWT_SECRET=$(head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9+/=' | head -c 64)
+IS_NEW_INSTALL=true
+if [ -f /etc/dpanel/.env ] && [ "$DO_CLEAN_REINSTALL" = false ]; then
+    log_info "Existing /etc/dpanel/.env preserved (credentials and secrets retained)."
+    IS_NEW_INSTALL=false
+    ADMIN_PASS="(Existing Password Preserved)"
+else
+    ADMIN_PASS=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 20)
+    JWT_SECRET=$(head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9+/=' | head -c 64)
 
-cat > /etc/dpanel/.env <<ENVEOF
+    cat > /etc/dpanel/.env <<ENVEOF
 # dPanel Enterprise Production Configuration
 PANEL_ENV="production"
 PANEL_PORT=2083
@@ -1045,7 +1037,8 @@ INITIAL_ADMIN_EMAIL="admin@dpanel.enterprise"
 INITIAL_ADMIN_PASSWORD="${ADMIN_PASS}"
 ENVEOF
 
-chmod 600 /etc/dpanel/.env
+    chmod 600 /etc/dpanel/.env
+fi
 
 
 # ------------------------------------------------------------------------------
@@ -1223,7 +1216,11 @@ fi
 
 echo ""
 echo -e "${GREEN}==================================================================${NC}"
+if [ "$IS_NEW_INSTALL" = true ]; then
 echo -e "${GREEN}   dPanel Enterprise Installation Completed Successfully!        ${NC}"
+else
+echo -e "${GREEN}   dPanel Enterprise In-Place Upgrade Completed Successfully!     ${NC}"
+fi
 echo -e "${GREEN}==================================================================${NC}"
 echo ""
 echo -e "  Panel URL:        ${BLUE}http://${DISPLAY_IP}:2083${NC}"
@@ -1232,7 +1229,11 @@ echo -e "  Internal URL:     ${BLUE}http://${INTERNAL_IP}:2083${NC}"
 fi
 echo -e "  phpMyAdmin:       ${BLUE}http://${DISPLAY_IP}:888${NC}"
 echo -e "  Username:         ${YELLOW}superadmin${NC}"
+if [ "$IS_NEW_INSTALL" = true ]; then
 echo -e "  Password:         ${YELLOW}${ADMIN_PASS}${NC}"
+else
+echo -e "  Password:         ${YELLOW}(Existing Credentials & Databases Preserved)${NC}"
+fi
 echo ""
 echo -e "  Configuration:    ${NC}/etc/dpanel/.env${NC}"
 echo -e "  Service Daemon:   ${NC}systemctl status dpaneld${NC}"

@@ -247,10 +247,14 @@ exit 0
 EOF
     fi
     chmod 755 /etc/mysql/debian-start 2>/dev/null || true
-    dpkg --configure -a 2>/dev/null || true
+    export DEBIAN_FRONTEND=noninteractive
+    rm -f /etc/mysql/mariadb.cnf /etc/mysql/my.cnf 2>/dev/null || true
+    dpkg --configure -a --force-confdef --force-confold 2>/dev/null || true
 
     apt-get update -y -q 2>/dev/null || apt-get update -y || true
     if ! apt-get install -y --no-install-recommends \
+        -o Dpkg::Options::="--force-confdef" \
+        -o Dpkg::Options::="--force-confold" \
         postgresql \
         postgresql-contrib \
         libpq5 \
@@ -274,11 +278,11 @@ EOF
         bash \
         procps; then
         log_warn "Fixing dpkg package dependencies and retrying..."
-        touch /etc/mysql/mariadb.cnf
-        chmod 644 /etc/mysql/mariadb.cnf
-        dpkg --configure -a || true
-        apt-get install -f -y
+        dpkg --configure -a --force-confdef --force-confold || true
+        apt-get install -f -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
         apt-get install -y --no-install-recommends \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold" \
             postgresql \
             postgresql-contrib \
             libpq5 \

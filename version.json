@@ -1,18 +1,17 @@
 {
-  "version": "1.0.2",
-  "release_name": "dPanel Enterprise Production Release v1.0.2",
-  "release_date": "2026-09-24",
+  "version": "1.0.6",
+  "release_name": "dPanel Enterprise Production Release v1.0.6",
+  "release_date": "2026-09-25",
   "changelog": [
-    "Fixed Nginx VHost HTTP/2 directive compatibility across all Nginx versions (1.18 - 1.26+)",
-    "Enhanced atomic virtualhost symlink creation and live syntax rollback protection",
-    "Prioritized index.php over placeholder index.html in document root routing",
-    "Integrated safe raw virtualhost editor with automated syntax verification and reloading",
-    "Node.js & Next.js App Settings & Resource Tuning (Port, Entry, Limits, .env manager)",
-    "Automated Nginx Reverse Proxy & 1-Click Let's Encrypt SSL for Node Applications",
-    "Per-Application Node.js / NVM Runtime Interpreter Switcher",
-    "Direct GitHub In-Portal Update Center with Zero-Data-Loss In-Place Upgrade Engine",
-    "Live PM2 Stdout & Stderr Log Stream Inspector with Real-Time Tail Extraction"
+    "Anti-Brute-Force Login Defense: Automatic 5-minute block on 3 wrong credentials, 1-hour block on repeat violations",
+    "Security Center Admin IP Release: Instant IP unban and brute-force attempt reset directly from dashboard",
+    "Access & Operating Records: Live 2000-line audit stream for web traffic and administrative actions",
+    "Unified Version Synchronizer: Consistent version display across sidebar, topbar, and settings",
+    "Database backup & dump modal popup with live gzip (.sql.gz) file downloads",
+    "Kernel-level packet filtering & firewall IP blocking engine (iptables + ufw + Nginx + fail2ban)",
+    "Hardened Nginx rate-limiting zone synchronization with zero-downtime reload",
+    "Zero-Data-Loss safe in-place upgrade engine preserving all databases, sites, and credentials"
   ],
-  "download_url": "https://github.com/dev-sec-it/dPanel/releases/latest",
+  "download_url": "https://github.com/devsecit/dPanel/releases/latest",
   "min_os_version": "Ubuntu 22.04 LTS, Debian 12, Alpine 3.19+"
 }

@@ -53,25 +53,181 @@ fi
 
 DO_CLEAN_REINSTALL=false
 DO_PURGE_PACKAGES=false
+INSTALL_MODE="install"
 
-for arg in "$@"; do
-    case "$arg" in
-        --purge|--purge-all|--deep-clean)
-            DO_CLEAN_REINSTALL=true
-            DO_PURGE_PACKAGES=true
+# ------------------------------------------------------------------------------
+# Dynamic Port & Admin Username Generators
+# ------------------------------------------------------------------------------
+generate_dynamic_port() {
+    local candidate
+    for _ in $(seq 1 50); do
+        if command -v shuf &>/dev/null; then
+            candidate=$(shuf -i 10000-60000 -n 1)
+        else
+            candidate=$(( 10000 + (RANDOM % 50000) ))
+        fi
+        if command -v ss &>/dev/null; then
+            if ss -tuln 2>/dev/null | grep -q ":${candidate} "; then
+                continue
+            fi
+        elif command -v netstat &>/dev/null; then
+            if netstat -tuln 2>/dev/null | grep -q ":${candidate} "; then
+                continue
+            fi
+        fi
+        echo "$candidate"
+        return 0
+    done
+    echo "2083"
+}
+
+generate_dynamic_username() {
+    local suffix
+    suffix=$(head -c 32 /dev/urandom | tr -dc 'a-z0-9' | head -c 6)
+    if [ -z "$suffix" ]; then
+        suffix=$(date +%s | tail -c 6)
+    fi
+    echo "adm_${suffix}"
+}
+
+# Parse CLI arguments
+CLI_ACTION=""
+CLI_PORT=""
+CLI_USER=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --fresh|--clean|--reinstall|-f|--purge|--purge-all|--deep-clean)
+            CLI_ACTION="fresh"
+            shift
             ;;
-        --fresh|--clean|--reinstall|-f)
-            DO_CLEAN_REINSTALL=true
+        --upgrade|--update|-u)
+            CLI_ACTION="upgrade"
+            shift
+            ;;
+        --port|-p)
+            CLI_PORT="${2:-}"
+            shift 2 2>/dev/null || shift
+            ;;
+        --username|--user)
+            CLI_USER="${2:-}"
+            shift 2 2>/dev/null || shift
+            ;;
+        *)
+            shift
             ;;
     esac
 done
 
-if [ "$DPANEL_EXISTING" = true ] && [ "$DO_CLEAN_REINSTALL" = false ]; then
-    log_section "Existing dPanel Installation Detected - Performing Safe In-Place Upgrade"
-    log_info "Preserving existing databases (PostgreSQL & MariaDB), websites, and panel credentials."
-    log_info "Upgrading system binaries to latest version with zero data loss..."
-    DO_CLEAN_REINSTALL=false
+if [ "$DPANEL_EXISTING" = true ]; then
+    INSTALL_CHOICE=""
+    if [ -n "$CLI_ACTION" ]; then
+        INSTALL_CHOICE="$CLI_ACTION"
+    elif [ -t 0 ] || [ -p /dev/stdin ]; then
+        echo ""
+        echo -e "${BLUE}==================================================================${NC}"
+        echo -e "${BLUE}        dPanel Enterprise Installation & Maintenance Mode        ${NC}"
+        echo -e "${BLUE}==================================================================${NC}"
+        echo -e "${YELLOW}[!] Existing dPanel installation detected on this system.${NC}"
+        echo ""
+        echo -e "  ${GREEN}[1] Safe Upgrade${NC}  (Zero Data Loss - Keep databases, websites, passwords)"
+        echo -e "  ${RED}[2] Fresh Install${NC} (Clean Reinstall - Wipe old databases & reset everything)"
+        echo ""
+        read -r -p "Enter your choice [1 or 2] (Default: 1): " USER_CHOICE
+        echo ""
+        case "$USER_CHOICE" in
+            2|"2"|"fresh"|"clean")
+                INSTALL_CHOICE="fresh"
+                ;;
+            *)
+                INSTALL_CHOICE="upgrade"
+                ;;
+        esac
+    else
+        # Default for automated background updates
+        INSTALL_CHOICE="upgrade"
+    fi
+
+    if [ "$INSTALL_CHOICE" = "fresh" ]; then
+        log_warn "WARNING: Fresh Install selected! All previous databases, websites, and settings will be wiped."
+        if [ -t 0 ]; then
+            read -r -p "Are you sure you want to completely erase existing data? [y/N]: " CONFIRM_WIPE
+            if [[ ! "$CONFIRM_WIPE" =~ ^[Yy]$ ]]; then
+                log_info "Operation cancelled by user. Retaining existing installation."
+                exit 0
+            fi
+        fi
+        DO_CLEAN_REINSTALL=true
+        DO_PURGE_PACKAGES=true
+        INSTALL_MODE="fresh"
+    else
+        log_section "Safe In-Place Upgrade Selected"
+        log_info "Preserving existing databases (PostgreSQL & MariaDB), websites, and panel credentials."
+        log_info "Upgrading system binaries to latest version with zero data loss..."
+        DO_CLEAN_REINSTALL=false
+        INSTALL_MODE="upgrade"
+    fi
 fi
+
+# ------------------------------------------------------------------------------
+# Resolve Active Port & Administrator Username
+# ------------------------------------------------------------------------------
+PANEL_PORT=""
+ADMIN_USER=""
+
+if [ "$INSTALL_MODE" = "upgrade" ] && [ -f "/etc/dpanel/.env" ]; then
+    PANEL_PORT=$(grep -E '^PANEL_PORT=' /etc/dpanel/.env 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d ' ' || true)
+    ADMIN_USER=$(grep -E '^INITIAL_ADMIN_USERNAME=' /etc/dpanel/.env 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d ' ' || true)
+fi
+
+# If port not set (fresh install or initial install)
+if [ -z "$PANEL_PORT" ]; then
+    if [ -n "$CLI_PORT" ] && [[ "$CLI_PORT" =~ ^[0-9]+$ ]] && [ "$CLI_PORT" -ge 1024 ] && [ "$CLI_PORT" -le 65535 ]; then
+        PANEL_PORT="$CLI_PORT"
+    else
+        DYNAMIC_PORT=$(generate_dynamic_port)
+        if [ -t 0 ] || [ -p /dev/stdin ]; then
+            echo ""
+            echo -e "${BLUE}------------------------------------------------------------------${NC}"
+            echo -e "${GREEN}[?] Custom Portal Port Configuration${NC}"
+            echo -e "    Generated Secure Dynamic Port: ${YELLOW}${DYNAMIC_PORT}${NC}"
+            read -r -p "    Enter port [Press Enter to keep ${DYNAMIC_PORT}]: " USER_IN_PORT
+            if [ -n "$USER_IN_PORT" ] && [[ "$USER_IN_PORT" =~ ^[0-9]+$ ]] && [ "$USER_IN_PORT" -ge 1024 ] && [ "$USER_IN_PORT" -le 65535 ]; then
+                PANEL_PORT="$USER_IN_PORT"
+            else
+                PANEL_PORT="$DYNAMIC_PORT"
+            fi
+        else
+            PANEL_PORT="$DYNAMIC_PORT"
+        fi
+    fi
+fi
+
+# If admin username not set (fresh install or initial install)
+if [ -z "$ADMIN_USER" ]; then
+    if [ -n "$CLI_USER" ] && [[ "$CLI_USER" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        ADMIN_USER="$CLI_USER"
+    else
+        DYNAMIC_USER=$(generate_dynamic_username)
+        if [ -t 0 ] || [ -p /dev/stdin ]; then
+            echo -e "${GREEN}[?] Custom Administrator Username Configuration${NC}"
+            echo -e "    Generated Dynamic Username: ${YELLOW}${DYNAMIC_USER}${NC}"
+            read -r -p "    Enter username [Press Enter to keep ${DYNAMIC_USER}]: " USER_IN_USER
+            if [ -n "$USER_IN_USER" ] && [[ "$USER_IN_USER" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+                ADMIN_USER="$USER_IN_USER"
+            else
+                ADMIN_USER="$DYNAMIC_USER"
+            fi
+            echo -e "${BLUE}------------------------------------------------------------------${NC}"
+            echo ""
+        else
+            ADMIN_USER="$DYNAMIC_USER"
+        fi
+    fi
+fi
+
+log_info "Active Portal Port: ${PANEL_PORT}"
+log_info "Active Administrator Username: ${ADMIN_USER}"
 
 if [ "$DO_CLEAN_REINSTALL" = true ]; then
     log_section "Performing Complete System Cleanup (Zero Residue)"
@@ -453,9 +609,32 @@ fi
 
 if [ -n "$SRC_DPANELD" ] && [ -n "$SRC_SERVER" ]; then
     log_info "Installing binaries from ${SRC_DPANELD%/*}..."
-    cp "$SRC_DPANELD" /usr/local/bin/dpaneld
-    cp "$SRC_SERVER" /usr/local/bin/dpanel-server
+
+    # 1. Stop background services if running so the binary files are unlocked
+    log_info "Stopping dPanel background services prior to binary deployment..."
+    if command -v systemctl &>/dev/null; then
+        systemctl stop dpaneld dpanel-server 2>/dev/null || true
+    elif command -v rc-service &>/dev/null; then
+        rc-service dpaneld stop 2>/dev/null || true
+        rc-service dpanel-server stop 2>/dev/null || true
+    fi
+    pkill -9 -f "/usr/local/bin/dpaneld" 2>/dev/null || true
+    pkill -9 -f "/usr/local/bin/dpanel-server" 2>/dev/null || true
+    sleep 1
+
+    # 2. Atomic replacement: unlink old binary or use install to prevent 'Text file busy'
+    rm -f /usr/local/bin/dpaneld.old /usr/local/bin/dpanel-server.old 2>/dev/null || true
+    if [ -f "/usr/local/bin/dpaneld" ]; then
+        mv -f /usr/local/bin/dpaneld /usr/local/bin/dpaneld.old 2>/dev/null || rm -f /usr/local/bin/dpaneld 2>/dev/null || true
+    fi
+    if [ -f "/usr/local/bin/dpanel-server" ]; then
+        mv -f /usr/local/bin/dpanel-server /usr/local/bin/dpanel-server.old 2>/dev/null || rm -f /usr/local/bin/dpanel-server 2>/dev/null || true
+    fi
+
+    cp -f "$SRC_DPANELD" /usr/local/bin/dpaneld
+    cp -f "$SRC_SERVER" /usr/local/bin/dpanel-server
     chmod 755 /usr/local/bin/dpaneld /usr/local/bin/dpanel-server
+    rm -f /usr/local/bin/dpaneld.old /usr/local/bin/dpanel-server.old 2>/dev/null || true
 else
     log_error "Compatible dPanel binaries (dpanel-server, dpaneld) for ${HOST_ARCH} not found and compilation failed."
     exit 1
@@ -709,6 +888,22 @@ cat > /var/www/phpmyadmin/sso.php <<'PMASSO'
 <?php
 declare(strict_types=1);
 
+// Resolve dynamic panel port from environment
+$panelPort = 2083;
+if (file_exists('/etc/dpanel/.env')) {
+    $envLines = @file('/etc/dpanel/.env', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if ($envLines) {
+        foreach ($envLines as $line) {
+            $line = trim($line);
+            if (strpos($line, 'PANEL_PORT=') === 0) {
+                $p = trim(substr($line, 11), " \t\n\r\0\x0B\"'");
+                if (is_numeric($p)) { $panelPort = (int)$p; }
+                break;
+            }
+        }
+    }
+}
+
 $ticket = isset($_GET['ticket']) ? trim($_GET['ticket']) : '';
 
 if (empty($ticket) || !preg_match('/^[0-9a-fA-F-]{36}$/', $ticket)) {
@@ -733,7 +928,7 @@ if (empty($ticket) || !preg_match('/^[0-9a-fA-F-]{36}$/', $ticket)) {
         <div class="badge">403 Forbidden</div>
         <h1>Authentication Required</h1>
         <p>Direct login without an active dPanel session ticket is strictly prohibited. Please log in to dPanel and launch phpMyAdmin from your control panel.</p>
-        <a href="http://' . htmlspecialchars($_SERVER['HTTP_HOST'] ? explode(':', $_SERVER['HTTP_HOST'])[0] : 'localhost') . ':2083" class="btn">Return to dPanel</a>
+        <a href="http://' . htmlspecialchars($_SERVER['HTTP_HOST'] ? explode(':', $_SERVER['HTTP_HOST'])[0] : 'localhost') . ':' . $panelPort . '" class="btn">Return to dPanel</a>
     </div>
 </body>
 </html>';
@@ -741,7 +936,7 @@ if (empty($ticket) || !preg_match('/^[0-9a-fA-F-]{36}$/', $ticket)) {
 }
 
 // Contact dPanel Core Server over local loopback to verify and atomically consume ticket
-$ch = curl_init('http://127.0.0.1:2083/api/v1/databases/sso/verify?ticket=' . urlencode($ticket));
+$ch = curl_init('http://127.0.0.1:' . $panelPort . '/api/v1/databases/sso/verify?ticket=' . urlencode($ticket));
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 curl_setopt($ch, CURLOPT_TIMEOUT, 5);
 curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 3);
@@ -771,7 +966,7 @@ if ($httpCode !== 200 || !$response) {
         <div class="badge">Session Invalid</div>
         <h1>Ticket Expired or Used</h1>
         <p>This single-use authentication ticket is invalid or has already expired. Please re-launch phpMyAdmin from dPanel.</p>
-        <a href="http://' . htmlspecialchars($_SERVER['HTTP_HOST'] ? explode(':', $_SERVER['HTTP_HOST'])[0] : 'localhost') . ':2083" class="btn">Return to dPanel</a>
+        <a href="http://' . htmlspecialchars($_SERVER['HTTP_HOST'] ? explode(':', $_SERVER['HTTP_HOST'])[0] : 'localhost') . ':' . $panelPort . '" class="btn">Return to dPanel</a>
     </div>
 </body>
 </html>';
@@ -904,7 +1099,7 @@ NGINXCONF
 ln -sf /etc/nginx/sites-available/phpmyadmin.conf /etc/nginx/sites-enabled/phpmyadmin.conf
 
 # Provision Port 80 Default Welcome Landing Page
-cat > /var/www/html/index.html <<'HTMLEOF'
+cat > /var/www/html/index.html <<HTMLEOF
 <!DOCTYPE html>
 <html>
 <head>
@@ -924,10 +1119,10 @@ cat > /var/www/html/index.html <<'HTMLEOF'
         <div class="logo">dPanel Enterprise</div>
         <h2>Web Server is Online</h2>
         <p>The high-performance Nginx web server is operational. Manage your websites, domains, SSL, Node.js applications, and databases from your control panel.</p>
-        <a href="http://127.0.0.1:2083" class="btn" id="pnlLink">Open Control Panel</a>
+        <a href="http://127.0.0.1:${PANEL_PORT}" class="btn" id="pnlLink">Open Control Panel</a>
     </div>
     <script>
-        document.getElementById('pnlLink').href = 'http://' + window.location.hostname + ':2083';
+        document.getElementById('pnlLink').href = 'http://' + window.location.hostname + ':${PANEL_PORT}';
     </script>
 </body>
 </html>
@@ -993,13 +1188,13 @@ if command -v ufw &>/dev/null; then
     ufw allow 80/tcp 2>/dev/null || true
     ufw allow 443/tcp 2>/dev/null || true
     ufw allow 888/tcp 2>/dev/null || true
-    ufw allow 2083/tcp 2>/dev/null || true
+    ufw allow "${PANEL_PORT}/tcp" 2>/dev/null || true
 fi
 if command -v iptables &>/dev/null; then
     iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
     iptables -I INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
     iptables -I INPUT -p tcp --dport 888 -j ACCEPT 2>/dev/null || true
-    iptables -I INPUT -p tcp --dport 2083 -j ACCEPT 2>/dev/null || true
+    iptables -I INPUT -p tcp --dport "${PANEL_PORT}" -j ACCEPT 2>/dev/null || true
 fi
 
 chown -R www-data:www-data /var/www/phpmyadmin /var/www/html /var/www/dpanel-acme-challenge 2>/dev/null || true
@@ -1014,11 +1209,14 @@ fi
 # ------------------------------------------------------------------------------
 log_info "Configuring environment and credentials..."
 
-IS_NEW_INSTALL=true
-if [ -f /etc/dpanel/.env ] && [ "$DO_CLEAN_REINSTALL" = false ]; then
+if [ -f "/etc/dpanel/.env" ] && [ "$DO_CLEAN_REINSTALL" = false ]; then
     log_info "Existing /etc/dpanel/.env preserved (credentials and secrets retained)."
-    IS_NEW_INSTALL=false
-    ADMIN_PASS="(Existing Password Preserved)"
+    EXISTING_PASS=$(grep -E '^INITIAL_ADMIN_PASSWORD=' /etc/dpanel/.env 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+    if [ -n "$EXISTING_PASS" ]; then
+        ADMIN_PASS="$EXISTING_PASS"
+    else
+        ADMIN_PASS="(Existing Password Preserved)"
+    fi
 else
     ADMIN_PASS=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 20)
     JWT_SECRET=$(head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9+/=' | head -c 64)
@@ -1026,14 +1224,14 @@ else
     cat > /etc/dpanel/.env <<ENVEOF
 # dPanel Enterprise Production Configuration
 PANEL_ENV="production"
-PANEL_PORT=2083
+PANEL_PORT=${PANEL_PORT}
 PANEL_HOST="0.0.0.0"
 DATABASE_URL="postgres://dpanel:dpanel_secure_password@127.0.0.1:5432/dpanel_db"
 JWT_SECRET="${JWT_SECRET}"
 IPC_SOCKET_PATH="/run/dpanel.sock"
 DAEMON_SOCKET="/run/dpanel.sock"
-INITIAL_ADMIN_USERNAME="superadmin"
-INITIAL_ADMIN_EMAIL="admin@dpanel.enterprise"
+INITIAL_ADMIN_USERNAME="${ADMIN_USER}"
+INITIAL_ADMIN_EMAIL="${ADMIN_USER}@dpanel.enterprise"
 INITIAL_ADMIN_PASSWORD="${ADMIN_PASS}"
 ENVEOF
 
@@ -1131,14 +1329,14 @@ RCEOF
 fi
 
 # ------------------------------------------------------------------------------
-# 11. Firewall & Essential Port Provisioning (2083, 80, 443, 888, 21, 22, 53)
+# 11. Firewall & Essential Port Provisioning (${PANEL_PORT}, 80, 443, 888, 21, 22, 53)
 # ------------------------------------------------------------------------------
-log_info "Configuring firewall and allowing production ports (2083, 80, 443, 888, 21, 22, 53)..."
+log_info "Configuring firewall and allowing production ports (${PANEL_PORT}, 80, 443, 888, 21, 22, 53)..."
 
 # A. UFW (Ubuntu / Debian)
 if command -v ufw &>/dev/null; then
     ufw allow 22/tcp comment 'SSH' 2>/dev/null || true
-    ufw allow 2083/tcp comment 'dPanel Control Plane' 2>/dev/null || true
+    ufw allow "${PANEL_PORT}/tcp" comment 'dPanel Control Plane' 2>/dev/null || true
     ufw allow 80/tcp comment 'HTTP Web' 2>/dev/null || true
     ufw allow 443/tcp comment 'HTTPS Web' 2>/dev/null || true
     ufw allow 888/tcp comment 'phpMyAdmin SSO' 2>/dev/null || true
@@ -1156,7 +1354,7 @@ fi
 if command -v firewall-cmd &>/dev/null; then
     if systemctl is-active --quiet firewalld 2>/dev/null; then
         firewall-cmd --permanent --add-port=22/tcp 2>/dev/null || true
-        firewall-cmd --permanent --add-port=2083/tcp 2>/dev/null || true
+        firewall-cmd --permanent --add-port="${PANEL_PORT}/tcp" 2>/dev/null || true
         firewall-cmd --permanent --add-port=80/tcp 2>/dev/null || true
         firewall-cmd --permanent --add-port=443/tcp 2>/dev/null || true
         firewall-cmd --permanent --add-port=888/tcp 2>/dev/null || true
@@ -1171,7 +1369,7 @@ fi
 
 # C. iptables Direct Rules (Universal fallback & Oracle Cloud override)
 if command -v iptables &>/dev/null; then
-    for port in 22 2083 80 443 888 21 20 53; do
+    for port in 22 "$PANEL_PORT" 80 443 888 21 20 53; do
         iptables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
     done
     iptables -I INPUT 1 -p tcp --dport 30000:30100 -j ACCEPT 2>/dev/null || true
@@ -1189,7 +1387,7 @@ sleep 2
 
 SERVER_ONLINE=0
 for attempt in 1 2 3 4 5; do
-    if curl -sf http://127.0.0.1:2083/health >/dev/null 2>&1 || curl -sf http://127.0.0.1:2083/ >/dev/null 2>&1; then
+    if curl -sf "http://127.0.0.1:${PANEL_PORT}/health" >/dev/null 2>&1 || curl -sf "http://127.0.0.1:${PANEL_PORT}/" >/dev/null 2>&1; then
         SERVER_ONLINE=1
         break
     fi
@@ -1216,23 +1414,23 @@ fi
 
 echo ""
 echo -e "${GREEN}==================================================================${NC}"
-if [ "$IS_NEW_INSTALL" = true ]; then
-echo -e "${GREEN}   dPanel Enterprise Installation Completed Successfully!        ${NC}"
+if [ "${INSTALL_MODE:-install}" = "upgrade" ]; then
+echo -e "${GREEN}   dPanel Enterprise Safe Upgrade Completed Successfully!         ${NC}"
 else
-echo -e "${GREEN}   dPanel Enterprise In-Place Upgrade Completed Successfully!     ${NC}"
+echo -e "${GREEN}   dPanel Enterprise Installation Completed Successfully!        ${NC}"
 fi
 echo -e "${GREEN}==================================================================${NC}"
 echo ""
-echo -e "  Panel URL:        ${BLUE}http://${DISPLAY_IP}:2083${NC}"
+echo -e "  Panel URL:        ${BLUE}http://${DISPLAY_IP}:${PANEL_PORT}${NC}"
 if [ "$DISPLAY_IP" != "$INTERNAL_IP" ] && [ -n "$INTERNAL_IP" ] && [ "$INTERNAL_IP" != "127.0.0.1" ]; then
-echo -e "  Internal URL:     ${BLUE}http://${INTERNAL_IP}:2083${NC}"
+echo -e "  Internal URL:     ${BLUE}http://${INTERNAL_IP}:${PANEL_PORT}${NC}"
 fi
 echo -e "  phpMyAdmin:       ${BLUE}http://${DISPLAY_IP}:888${NC}"
-echo -e "  Username:         ${YELLOW}superadmin${NC}"
-if [ "$IS_NEW_INSTALL" = true ]; then
-echo -e "  Password:         ${YELLOW}${ADMIN_PASS}${NC}"
+echo -e "  Username:         ${YELLOW}${ADMIN_USER}${NC}"
+if [ "${INSTALL_MODE:-install}" = "upgrade" ]; then
+echo -e "  Password:         ${YELLOW}(Existing Password Preserved)${NC}"
 else
-echo -e "  Password:         ${YELLOW}(Existing Credentials & Databases Preserved)${NC}"
+echo -e "  Password:         ${YELLOW}${ADMIN_PASS}${NC}"
 fi
 echo ""
 echo -e "  Configuration:    ${NC}/etc/dpanel/.env${NC}"

@@ -224,9 +224,22 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         fi
     fi
 
-    # Fix Sury PHP repository missing GPG keys if present
-    if [ -f /etc/apt/sources.list.d/php.list ] || grep -rq "packages.sury.org" /etc/apt/sources.list* 2>/dev/null; then
-        curl -sSLo /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg 2>/dev/null || true
+    # Configure Ondrej PPA / Sury PHP repository for multi-PHP runtime support (7.4 to 8.5)
+    log_info "Configuring multi-PHP runtime upstream repository..."
+    rm -f /etc/apt/sources.list.d/ondrej-php.list
+    apt-get install -y --no-install-recommends software-properties-common ca-certificates curl gnupg 2>/dev/null || true
+    if [ "$OS_ID" = "ubuntu" ]; then
+        LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php 2>/dev/null || {
+            mkdir -p /etc/apt/trusted.gpg.d
+            curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x14aa40ec0831756756d7f66c4f4ea0aae5267a6c" | gpg --dearmor -o /etc/apt/trusted.gpg.d/ondrej-php.gpg 2>/dev/null || true
+            UBUNTU_CODENAME="${VERSION_CODENAME:-noble}"
+            echo "deb [signed-by=/etc/apt/trusted.gpg.d/ondrej-php.gpg] https://ppa.launchpadcontent.net/ondrej/php/ubuntu ${UBUNTU_CODENAME} main" > /etc/apt/sources.list.d/ondrej-php.list
+        }
+    elif [ "$OS_ID" = "debian" ]; then
+        mkdir -p /etc/apt/trusted.gpg.d
+        curl -fsSL https://packages.sury.org/php/apt.gpg -o /etc/apt/trusted.gpg.d/php-sury.gpg 2>/dev/null || true
+        DEB_CODENAME="${VERSION_CODENAME:-bookworm}"
+        echo "deb [signed-by=/etc/apt/trusted.gpg.d/php-sury.gpg] https://packages.sury.org/php/ ${DEB_CODENAME} main" > /etc/apt/sources.list.d/php.list
     fi
 
     # Fix Debian/Ubuntu 24.04 mariadb-common update-alternatives and debian-start bug

@@ -1180,8 +1180,50 @@ fi
 [ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php8.3-fpm.sock"
 ln -sf "$PHP_SOCK" /run/php/php-fpm.sock 2>/dev/null || true
 
-mkdir -p /etc/nginx/conf.d /etc/nginx/sites-available /etc/nginx/sites-enabled /var/www/html /www/wwwroot /var/www/dpanel-acme-challenge
+mkdir -p /etc/nginx/conf.d /etc/nginx/sites-available /etc/nginx/sites-enabled /var/www/html /www/wwwroot /var/www/dpanel-acme-challenge /var/www/dpanel-error-pages
 chmod 777 /var/www/dpanel-acme-challenge 2>/dev/null || true
+
+# Provision Standard dPanel System Error Pages (Light Theme)
+for _code_info in "403:Forbidden:Access to this resource is strictly denied by server security policy.:#e11d48:#fff1f2:#fecdd3" \
+                  "404:Not Found:The requested URL was not found on this server. Please verify the URL or return to the homepage.:#2563eb:#eff6ff:#bfdbfe" \
+                  "500:Internal Server Error:The server encountered an internal error while processing this request.:#d97706:#fffbeb:#fde68a" \
+                  "502:Bad Gateway:The gateway or upstream server failed to respond or returned an invalid response.:#d97706:#fffbeb:#fde68a" \
+                  "503:Service Unavailable:The server or application is temporarily overloaded or down for maintenance.:#d97706:#fffbeb:#fde68a" \
+                  "50x:Server Error:An unexpected server error occurred while fulfilling your request.:#d97706:#fffbeb:#fde68a"; do
+    IFS=':' read -r _c _t _m _clr _bg _brd <<< "$_code_info"
+    cat > "/var/www/dpanel-error-pages/${_c}.html" <<ERRPAGE
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>${_c} ${_t} - dPanel</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background-color: #f8fafc; color: #1e293b; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 1.5rem; }
+        .card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.025); max-width: 480px; width: 100%; padding: 2.5rem; text-align: center; }
+        .badge { display: inline-block; padding: 0.35rem 1rem; border-radius: 9999px; font-size: 0.875rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1.25rem; color: ${_clr}; background-color: ${_bg}; border: 1px solid ${_brd}; }
+        h1 { font-size: 1.5rem; font-weight: 700; color: #0f172a; margin-bottom: 0.75rem; }
+        p { font-size: 0.95rem; color: #64748b; line-height: 1.6; margin-bottom: 2rem; }
+        .btn { display: inline-flex; align-items: center; justify-content: center; background-color: #2563eb; color: #ffffff; padding: 0.75rem 1.5rem; border-radius: 8px; font-size: 0.95rem; font-weight: 600; text-decoration: none; transition: background-color 0.15s ease-in-out; }
+        .btn:hover { background-color: #1d4ed8; }
+        .footer { margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid #f1f5f9; font-size: 0.8rem; color: #94a3b8; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="badge">${_c} ${_t}</div>
+        <h1>${_t}</h1>
+        <p>${_m}</p>
+        <a href="/" class="btn">Return to Homepage</a>
+        <div class="footer">dPanel Web Server</div>
+    </div>
+</body>
+</html>
+ERRPAGE
+done
+chmod -R 755 /var/www/dpanel-error-pages 2>/dev/null || true
+chown -R www-data:www-data /var/www/dpanel-error-pages 2>/dev/null || true
 
 # Ensure nginx.conf includes sites-enabled
 if [ -f /etc/nginx/nginx.conf ]; then

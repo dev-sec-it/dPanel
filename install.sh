@@ -841,45 +841,81 @@ declare(strict_types=1);
  * dPanel Enterprise Session Signon Provider for phpMyAdmin
  * Seamlessly authenticates active dPanel sessions into phpMyAdmin.
  */
-$sessionDir = '/var/www/phpmyadmin/tmp/sessions';
-if (!is_dir($sessionDir)) {
-    @mkdir($sessionDir, 0777, true);
+
+namespace {
+    if (!function_exists('get_login_credentials')) {
+        function get_login_credentials($user = '')
+        {
+            $sessionDir = '/var/www/phpmyadmin/tmp/sessions';
+            if (!is_dir($sessionDir)) {
+                @mkdir($sessionDir, 0777, true);
+            }
+
+            $cookieName = 'dpanel_pma_auth';
+            if (empty($_COOKIE[$cookieName])) {
+                return ['', ''];
+            }
+
+            $token = trim((string)$_COOKIE[$cookieName]);
+            if (!preg_match('/^[0-9a-fA-F]{32}$/', $token)) {
+                return ['', ''];
+            }
+
+            $sessionFile = $sessionDir . '/sess_' . $token . '.json';
+            if (!file_exists($sessionFile)) {
+                return ['', ''];
+            }
+
+            $content = @file_get_contents($sessionFile);
+            if (!$content) {
+                return ['', ''];
+            }
+
+            $data = @json_decode($content, true);
+            if (!$data || empty($data['db_user']) || empty($data['db_pass']) || empty($data['expires_at'])) {
+                @unlink($sessionFile);
+                return ['', ''];
+            }
+
+            // Check expiration (inactivity timeout)
+            if (time() > (int)$data['expires_at']) {
+                @unlink($sessionFile);
+                return ['', ''];
+            }
+
+            // Slide expiration: extend session on active use (15 mins)
+            $data['expires_at'] = time() + 900;
+            @file_put_contents($sessionFile, json_encode($data), LOCK_EX);
+
+            // Provide credentials to phpMyAdmin session
+            if (session_status() === PHP_SESSION_NONE) {
+                @session_name('SignonSession');
+                @session_start();
+            }
+            $_SESSION['PMA_single_signon_user'] = (string)$data['db_user'];
+            $_SESSION['PMA_single_signon_password'] = (string)$data['db_pass'];
+            $_SESSION['PMA_single_signon_host'] = '127.0.0.1';
+            $_SESSION['PMA_single_signon_port'] = 3306;
+
+            $GLOBALS['single_signon_user'] = (string)$data['db_user'];
+            $GLOBALS['single_signon_password'] = (string)$data['db_pass'];
+            $GLOBALS['single_signon_host'] = '127.0.0.1';
+            $GLOBALS['single_signon_port'] = 3306;
+
+            return [
+                (string)$data['db_user'],
+                (string)$data['db_pass']
+            ];
+        }
+    }
+    get_login_credentials();
 }
 
-$cookieName = 'dpanel_pma_auth';
-if (!empty($_COOKIE[$cookieName])) {
-    $token = trim((string)$_COOKIE[$cookieName]);
-    if (preg_match('/^[0-9a-fA-F]{32}$/', $token)) {
-        $sessionFile = $sessionDir . '/sess_' . $token . '.json';
-        if (file_exists($sessionFile)) {
-            $content = @file_get_contents($sessionFile);
-            if ($content) {
-                $data = @json_decode($content, true);
-                if ($data && !empty($data['db_user']) && !empty($data['db_pass']) && !empty($data['expires_at'])) {
-                    if (time() <= (int)$data['expires_at']) {
-                        // Slide expiration (15 minutes)
-                        $data['expires_at'] = time() + 900;
-                        @file_put_contents($sessionFile, json_encode($data), LOCK_EX);
-
-                        // Provide credentials to phpMyAdmin session
-                        if (session_status() === PHP_SESSION_NONE) {
-                            @session_name('SignonSession');
-                            @session_start();
-                        }
-                        $_SESSION['PMA_single_signon_user'] = (string)$data['db_user'];
-                        $_SESSION['PMA_single_signon_password'] = (string)$data['db_pass'];
-                        $_SESSION['PMA_single_signon_host'] = '127.0.0.1';
-                        $_SESSION['PMA_single_signon_port'] = 3306;
-
-                        $GLOBALS['single_signon_user'] = (string)$data['db_user'];
-                        $GLOBALS['single_signon_password'] = (string)$data['db_pass'];
-                        $GLOBALS['single_signon_host'] = '127.0.0.1';
-                        $GLOBALS['single_signon_port'] = 3306;
-                    } else {
-                        @unlink($sessionFile);
-                    }
-                }
-            }
+namespace PhpMyAdmin\Plugins\Auth {
+    if (!function_exists('PhpMyAdmin\Plugins\Auth\get_login_credentials')) {
+        function get_login_credentials($user = '')
+        {
+            return \get_login_credentials($user);
         }
     }
 }

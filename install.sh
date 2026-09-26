@@ -1027,12 +1027,21 @@ systemctl enable --now php-fpm 2>/dev/null || true
 systemctl restart php-fpm 2>/dev/null || true
 
 PHP_SOCK=""
-for s in /run/php/php8.5-fpm.sock /run/php/php8.4-fpm.sock /run/php/php8.3-fpm.sock /run/php/php8.2-fpm.sock /run/php/php8.1-fpm.sock /run/php/php-fpm.sock /var/run/php/php8.3-fpm.sock; do
+for s in $(find /run/php /var/run/php /run/php-fpm /var/run/php-fpm -name "*fpm*.sock" -o -name "*.sock" 2>/dev/null); do
     if [ -S "$s" ]; then
         PHP_SOCK="$s"
         break
     fi
 done
+
+if [ -z "$PHP_SOCK" ]; then
+    for s in /run/php/php8.5-fpm.sock /run/php/php8.4-fpm.sock /run/php/php8.3-fpm.sock /run/php/php8.2-fpm.sock /run/php/php8.1-fpm.sock /run/php/php8.0-fpm.sock /run/php/php7.4-fpm.sock /run/php/php-fpm.sock /var/run/php/php8.3-fpm.sock /var/run/php/php-fpm.sock; do
+        if [ -e "$s" ] || [ -S "$s" ]; then
+            PHP_SOCK="$s"
+            break
+        fi
+    done
+fi
 
 if [ -z "$PHP_SOCK" ]; then
     service php8.3-fpm restart 2>/dev/null || service php-fpm restart 2>/dev/null || true
@@ -1097,6 +1106,75 @@ server {
 NGINXCONF
 
 ln -sf /etc/nginx/sites-available/phpmyadmin.conf /etc/nginx/sites-enabled/phpmyadmin.conf
+
+# ------------------------------------------------------------------------------
+# 9. elFinder File Manager - Port 8089 (Embedded in dPanel Binary)
+# ------------------------------------------------------------------------------
+log_info "Configuring elFinder File Manager vhost on port 8089..."
+
+ELFINDER_WEB_DIR="/var/www/elfinder"
+mkdir -p "$ELFINDER_WEB_DIR"
+mkdir -p /tmp/.elfinder_tmb
+chown -R www-data:www-data "${ELFINDER_WEB_DIR}" /tmp/.elfinder_tmb 2>/dev/null || true
+chmod 777 /tmp/.elfinder_tmb 2>/dev/null || true
+chmod 755 "${ELFINDER_WEB_DIR}" 2>/dev/null || true
+
+# Allow firewall for elFinder port 8089
+if command -v ufw &>/dev/null; then
+    ufw allow 8089/tcp 2>/dev/null || true
+fi
+if command -v iptables &>/dev/null; then
+    iptables -I INPUT -p tcp --dport 8089 -j ACCEPT 2>/dev/null || true
+fi
+
+# Nginx vhost for elFinder on port 8089
+cat > /etc/nginx/sites-available/elfinder.conf << ELFNGINX
+server {
+    listen 8089;
+    server_name _;
+    root ${ELFINDER_WEB_DIR};
+    index index.php index.html;
+    client_max_body_size 1024M;
+
+    add_header Access-Control-Allow-Origin * always;
+    add_header Access-Control-Allow-Methods 'GET, POST, OPTIONS, HEAD, PUT, DELETE' always;
+    add_header Access-Control-Allow-Headers '*' always;
+
+    location / {
+        if (\$request_method = 'OPTIONS') {
+            add_header Access-Control-Allow-Origin * always;
+            add_header Access-Control-Allow-Methods 'GET, POST, OPTIONS, HEAD, PUT, DELETE' always;
+            add_header Access-Control-Allow-Headers '*' always;
+            return 204;
+        }
+        try_files \$uri \$uri/ /index.php?\$args;
+    }
+
+    # Block direct HTTP access to internal PHP libraries
+    location ^~ /php/ {
+        deny all;
+    }
+
+    location ~ \.php\$ {
+        include fastcgi_params;
+        fastcgi_pass unix:${PHP_SOCK};
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param PATH_INFO \$fastcgi_path_info;
+        fastcgi_read_timeout 300;
+        fastcgi_buffer_size 128k;
+        fastcgi_buffers 4 256k;
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+}
+ELFNGINX
+
+ln -sf /etc/nginx/sites-available/elfinder.conf /etc/nginx/sites-enabled/elfinder.conf
+log_info "elFinder File Manager configured on port 8089 using PHP-FPM socket (${PHP_SOCK})."
+
 
 # Provision Port 80 Default Welcome Landing Page
 cat > /var/www/html/index.html <<HTMLEOF
@@ -1237,6 +1315,17 @@ ENVEOF
 
     chmod 600 /etc/dpanel/.env
 fi
+
+# Provision isolated /var/www/elfinder/.env with JWT_SECRET for PHP-FPM elFinder session authentication
+ACTIVE_JWT_SECRET=$(grep -E '^JWT_SECRET=' /etc/dpanel/.env 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+ACTIVE_PANEL_PORT=$(grep -E '^PANEL_PORT=' /etc/dpanel/.env 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+mkdir -p /var/www/elfinder
+cat > /var/www/elfinder/.env <<ELFNV
+JWT_SECRET="${ACTIVE_JWT_SECRET}"
+PANEL_PORT=${ACTIVE_PANEL_PORT}
+ELFNV
+chown www-data:www-data /var/www/elfinder/.env 2>/dev/null || true
+chmod 600 /var/www/elfinder/.env
 
 
 # ------------------------------------------------------------------------------

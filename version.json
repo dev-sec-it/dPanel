@@ -1,6 +1,6 @@
 {
-  "version": "1.0.24",
-  "release_name": "dPanel Enterprise Production Release v1.0.24",
+  "version": "1.0.26",
+  "release_name": "dPanel Enterprise Production Release v1.0.26",
   "release_date": "2026-09-25",
   "changelog": [
     "Anti-Brute-Force Login Defense: Automatic 5-minute block on 3 wrong credentials, 1-hour block on repeat violations",

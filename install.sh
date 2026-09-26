@@ -371,12 +371,18 @@ if [ "$PKG_MANAGER" = "apt" ]; then
     rm -f /etc/apt/sources.list.d/ondrej-php.list
     apt-get install -y --no-install-recommends software-properties-common ca-certificates curl gnupg 2>/dev/null || true
     if [ "$OS_ID" = "ubuntu" ]; then
-        LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php 2>/dev/null || {
-            mkdir -p /etc/apt/trusted.gpg.d
-            curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x14aa40ec0831756756d7f66c4f4ea0aae5267a6c" | gpg --dearmor -o /etc/apt/trusted.gpg.d/ondrej-php.gpg 2>/dev/null || true
-            UBUNTU_CODENAME="${VERSION_CODENAME:-noble}"
-            echo "deb [signed-by=/etc/apt/trusted.gpg.d/ondrej-php.gpg] https://ppa.launchpadcontent.net/ondrej/php/ubuntu ${UBUNTU_CODENAME} main" > /etc/apt/sources.list.d/ondrej-php.list
-        }
+        mkdir -p /etc/apt/keyrings
+        curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x71DAEAAB4AD4CAB6" \
+            | gpg --dearmor -o /etc/apt/keyrings/ondrej-php.gpg 2>/dev/null || true
+        UBUNTU_CODENAME="${VERSION_CODENAME:-noble}"
+        PPA_CHECK=$(curl -s -o /dev/null -w "%{http_code}" "https://ppa.launchpadcontent.net/ondrej/php/ubuntu/dists/${UBUNTU_CODENAME}/Release")
+        if [ "$PPA_CHECK" != "200" ]; then
+            log_warn "Ondrej PPA has no release for '${UBUNTU_CODENAME}' (HTTP ${PPA_CHECK}). Falling back to 'noble'."
+            UBUNTU_CODENAME="noble"
+        fi
+        log_info "Using Ondrej PPA codename: ${UBUNTU_CODENAME}"
+        find /etc/apt/sources.list.d/ -name "*ondrej*" -exec rm -f {} \; 2>/dev/null || true
+        echo "deb [signed-by=/etc/apt/keyrings/ondrej-php.gpg] https://ppa.launchpadcontent.net/ondrej/php/ubuntu ${UBUNTU_CODENAME} main" > /etc/apt/sources.list.d/ondrej-php.list
     elif [ "$OS_ID" = "debian" ]; then
         mkdir -p /etc/apt/trusted.gpg.d
         curl -fsSL https://packages.sury.org/php/apt.gpg -o /etc/apt/trusted.gpg.d/php-sury.gpg 2>/dev/null || true
@@ -818,6 +824,7 @@ $cfg['Servers'][$i]['host'] = '127.0.0.1';
 $cfg['Servers'][$i]['port'] = '3306';
 $cfg['Servers'][$i]['compress'] = false;
 $cfg['Servers'][$i]['AllowNoPassword'] = false;
+$cfg['Servers'][$i]['SignonSession'] = 'SignonSession';
 $cfg['Servers'][$i]['SignonScript'] = '/var/www/phpmyadmin/signon_checker.php';
 $cfg['Servers'][$i]['SignonURL'] = 'sso.php';
 $cfg['UploadDir'] = '';
@@ -831,66 +838,73 @@ cat > /var/www/phpmyadmin/signon_checker.php <<'PMASIGNON'
 declare(strict_types=1);
 
 /**
- * dPanel Enterprise Session Checker for phpMyAdmin
- * Enforces authenticated active session validation on EVERY request.
+ * dPanel Enterprise Session Signon Provider for phpMyAdmin
+ * Seamlessly authenticates active dPanel sessions into phpMyAdmin.
  */
-function get_login_credentials($user)
-{
-    $sessionDir = '/var/www/phpmyadmin/tmp/sessions';
-    if (!is_dir($sessionDir)) {
-        @mkdir($sessionDir, 0700, true);
+$sessionDir = '/var/www/phpmyadmin/tmp/sessions';
+if (!is_dir($sessionDir)) {
+    @mkdir($sessionDir, 0777, true);
+}
+
+$cookieName = 'dpanel_pma_auth';
+if (!empty($_COOKIE[$cookieName])) {
+    $token = trim((string)$_COOKIE[$cookieName]);
+    if (preg_match('/^[0-9a-fA-F]{32}$/', $token)) {
+        $sessionFile = $sessionDir . '/sess_' . $token . '.json';
+        if (file_exists($sessionFile)) {
+            $content = @file_get_contents($sessionFile);
+            if ($content) {
+                $data = @json_decode($content, true);
+                if ($data && !empty($data['db_user']) && !empty($data['db_pass']) && !empty($data['expires_at'])) {
+                    if (time() <= (int)$data['expires_at']) {
+                        // Slide expiration (15 minutes)
+                        $data['expires_at'] = time() + 900;
+                        @file_put_contents($sessionFile, json_encode($data), LOCK_EX);
+
+                        // Provide credentials to phpMyAdmin session
+                        if (session_status() === PHP_SESSION_NONE) {
+                            @session_name('SignonSession');
+                            @session_start();
+                        }
+                        $_SESSION['PMA_single_signon_user'] = (string)$data['db_user'];
+                        $_SESSION['PMA_single_signon_password'] = (string)$data['db_pass'];
+                        $_SESSION['PMA_single_signon_host'] = '127.0.0.1';
+                        $_SESSION['PMA_single_signon_port'] = 3306;
+
+                        $GLOBALS['single_signon_user'] = (string)$data['db_user'];
+                        $GLOBALS['single_signon_password'] = (string)$data['db_pass'];
+                        $GLOBALS['single_signon_host'] = '127.0.0.1';
+                        $GLOBALS['single_signon_port'] = 3306;
+                    } else {
+                        @unlink($sessionFile);
+                    }
+                }
+            }
+        }
     }
-
-    $cookieName = 'dpanel_pma_auth';
-    if (empty($_COOKIE[$cookieName])) {
-        return ['', ''];
-    }
-
-    $token = trim($_COOKIE[$cookieName]);
-    if (!preg_match('/^[0-9a-fA-F]{32}$/', $token)) {
-        return ['', ''];
-    }
-
-    $sessionFile = $sessionDir . '/sess_' . $token . '.json';
-    if (!file_exists($sessionFile)) {
-        return ['', ''];
-    }
-
-    $content = @file_get_contents($sessionFile);
-    if (!$content) {
-        return ['', ''];
-    }
-
-    $data = @json_decode($content, true);
-    if (!$data || empty($data['db_user']) || empty($data['db_pass']) || empty($data['expires_at'])) {
-        @unlink($sessionFile);
-        return ['', ''];
-    }
-
-    // Check expiration (inactivity timeout)
-    if (time() > (int)$data['expires_at']) {
-        @unlink($sessionFile);
-        return ['', ''];
-    }
-
-    // Sliding expiration: extend session on active use (15 mins)
-    $data['expires_at'] = time() + 900;
-    @file_put_contents($sessionFile, json_encode($data), LOCK_EX);
-
-    return [
-        $data['db_user'],
-        $data['db_pass']
-    ];
 }
 PMASIGNON
+
+mkdir -p /var/www/phpmyadmin/tmp/sessions
+chown -R www-data:www-data /var/www/phpmyadmin
+chmod -R 775 /var/www/phpmyadmin/tmp
+
+cat > /var/www/phpmyadmin/panel_config.php <<PMAENV
+<?php
+\$panelPort = ${PANEL_PORT};
+PMAENV
+chown www-data:www-data /var/www/phpmyadmin/panel_config.php 2>/dev/null || true
+chmod 644 /var/www/phpmyadmin/panel_config.php 2>/dev/null || true
 
 cat > /var/www/phpmyadmin/sso.php <<'PMASSO'
 <?php
 declare(strict_types=1);
 
-// Resolve dynamic panel port from environment
+// Resolve dynamic panel port from panel_config.php or /etc/dpanel/.env
 $panelPort = 2083;
-if (file_exists('/etc/dpanel/.env')) {
+if (file_exists(__DIR__ . '/panel_config.php')) {
+    include __DIR__ . '/panel_config.php';
+} elseif (file_exists('/etc/dpanel/.env')) {
     $envLines = @file('/etc/dpanel/.env', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     if ($envLines) {
         foreach ($envLines as $line) {
@@ -904,9 +918,49 @@ if (file_exists('/etc/dpanel/.env')) {
     }
 }
 
-$ticket = isset($_GET['ticket']) ? trim($_GET['ticket']) : '';
+$sessionDir = '/var/www/phpmyadmin/tmp/sessions';
+if (!is_dir($sessionDir)) {
+    @mkdir($sessionDir, 0777, true);
+}
 
+// Check if client already possesses an active valid session
+$cookieName = 'dpanel_pma_auth';
+$hasActiveSession = false;
+if (!empty($_COOKIE[$cookieName])) {
+    $token = trim((string)$_COOKIE[$cookieName]);
+    if (preg_match('/^[0-9a-fA-F]{32}$/', $token)) {
+        $sessionFile = $sessionDir . '/sess_' . $token . '.json';
+        if (file_exists($sessionFile)) {
+            $content = @file_get_contents($sessionFile);
+            if ($content) {
+                $data = @json_decode($content, true);
+                if ($data && !empty($data['db_user']) && !empty($data['db_pass']) && !empty($data['expires_at'])) {
+                    if (time() <= (int)$data['expires_at']) {
+                        $hasActiveSession = true;
+                        if (session_status() === PHP_SESSION_NONE) {
+                            @session_name('SignonSession');
+                            @session_start();
+                        }
+                        $_SESSION['PMA_single_signon_user'] = (string)$data['db_user'];
+                        $_SESSION['PMA_single_signon_password'] = (string)$data['db_pass'];
+                        $_SESSION['PMA_single_signon_host'] = '127.0.0.1';
+                        $_SESSION['PMA_single_signon_port'] = 3306;
+                        @session_write_close();
+                    }
+                }
+            }
+        }
+    }
+}
+
+$ticket = isset($_GET['ticket']) ? trim((string)$_GET['ticket']) : '';
+
+// If no ticket provided, but already authenticated, enter phpMyAdmin directly
 if (empty($ticket) || !preg_match('/^[0-9a-fA-F-]{36}$/', $ticket)) {
+    if ($hasActiveSession) {
+        header('Location: index.php');
+        exit;
+    }
     http_response_code(403);
     header('Content-Type: text/html; charset=utf-8');
     echo '<!DOCTYPE html>
@@ -920,7 +974,7 @@ if (empty($ticket) || !preg_match('/^[0-9a-fA-F-]{36}$/', $ticket)) {
         .badge { display: inline-block; padding: 4px 12px; background: #fee2e2; color: #ef4444; font-weight: 600; font-size: 0.875rem; border-radius: 9999px; margin-bottom: 1rem; }
         h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.5rem; }
         p { color: #64748b; font-size: 0.875rem; line-height: 1.5; margin-bottom: 1.5rem; }
-        .btn { display: inline-block; background: #2563eb; color: #ffffff; padding: 0.625rem 1.25rem; border-radius: 6px; font-weight: 500; font-size: 0.875rem; text-decoration: none; }
+        .btn { display: inline-block; background: #16a34a; color: #ffffff; padding: 0.625rem 1.25rem; border-radius: 6px; font-weight: 500; font-size: 0.875rem; text-decoration: none; }
     </style>
 </head>
 <body>
@@ -928,7 +982,7 @@ if (empty($ticket) || !preg_match('/^[0-9a-fA-F-]{36}$/', $ticket)) {
         <div class="badge">403 Forbidden</div>
         <h1>Authentication Required</h1>
         <p>Direct login without an active dPanel session ticket is strictly prohibited. Please log in to dPanel and launch phpMyAdmin from your control panel.</p>
-        <a href="http://' . htmlspecialchars($_SERVER['HTTP_HOST'] ? explode(':', $_SERVER['HTTP_HOST'])[0] : 'localhost') . ':' . $panelPort . '" class="btn">Return to dPanel</a>
+        <a href="http://' . htmlspecialchars($_SERVER['HTTP_HOST'] ? explode(':', $_SERVER['HTTP_HOST'])[0] : 'localhost') . ':' . $panelPort . '/databases" class="btn">Return to dPanel</a>
     </div>
 </body>
 </html>';
@@ -936,15 +990,39 @@ if (empty($ticket) || !preg_match('/^[0-9a-fA-F-]{36}$/', $ticket)) {
 }
 
 // Contact dPanel Core Server over local loopback to verify and atomically consume ticket
-$ch = curl_init('http://127.0.0.1:' . $panelPort . '/api/v1/databases/sso/verify?ticket=' . urlencode($ticket));
-curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-curl_setopt($ch, CURLOPT_TIMEOUT, 5);
-curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 3);
-$response = curl_exec($ch);
-$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-curl_close($ch);
+$verifyUrl = 'http://127.0.0.1:' . $panelPort . '/api/v1/databases/sso/verify?ticket=' . urlencode($ticket);
+$response = false;
+$httpCode = 0;
+
+if (function_exists('curl_init')) {
+    $ch = curl_init($verifyUrl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 4);
+    $response = curl_exec($ch);
+    $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+}
 
 if ($httpCode !== 200 || !$response) {
+    $ctx = stream_context_create([
+        'http' => [
+            'timeout' => 8,
+            'ignore_errors' => true
+        ]
+    ]);
+    $streamRes = @file_get_contents($verifyUrl, false, $ctx);
+    if ($streamRes) {
+        $response = $streamRes;
+        $httpCode = 200;
+    }
+}
+
+if ($httpCode !== 200 || !$response) {
+    if ($hasActiveSession) {
+        header('Location: index.php');
+        exit;
+    }
     http_response_code(403);
     header('Content-Type: text/html; charset=utf-8');
     echo '<!DOCTYPE html>
@@ -958,7 +1036,7 @@ if ($httpCode !== 200 || !$response) {
         .badge { display: inline-block; padding: 4px 12px; background: #fee2e2; color: #ef4444; font-weight: 600; font-size: 0.875rem; border-radius: 9999px; margin-bottom: 1rem; }
         h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.5rem; }
         p { color: #64748b; font-size: 0.875rem; line-height: 1.5; margin-bottom: 1.5rem; }
-        .btn { display: inline-block; background: #2563eb; color: #ffffff; padding: 0.625rem 1.25rem; border-radius: 6px; font-weight: 500; font-size: 0.875rem; text-decoration: none; }
+        .btn { display: inline-block; background: #16a34a; color: #ffffff; padding: 0.625rem 1.25rem; border-radius: 6px; font-weight: 500; font-size: 0.875rem; text-decoration: none; }
     </style>
 </head>
 <body>
@@ -966,46 +1044,56 @@ if ($httpCode !== 200 || !$response) {
         <div class="badge">Session Invalid</div>
         <h1>Ticket Expired or Used</h1>
         <p>This single-use authentication ticket is invalid or has already expired. Please re-launch phpMyAdmin from dPanel.</p>
-        <a href="http://' . htmlspecialchars($_SERVER['HTTP_HOST'] ? explode(':', $_SERVER['HTTP_HOST'])[0] : 'localhost') . ':' . $panelPort . '" class="btn">Return to dPanel</a>
+        <a href="http://' . htmlspecialchars($_SERVER['HTTP_HOST'] ? explode(':', $_SERVER['HTTP_HOST'])[0] : 'localhost') . ':' . $panelPort . '/databases" class="btn">Return to dPanel</a>
     </div>
 </body>
 </html>';
     exit;
 }
 
-$payload = json_decode($response, true);
+$payload = @json_decode($response, true);
 if (empty($payload['valid']) || empty($payload['db_user']) || empty($payload['db_pass'])) {
+    if ($hasActiveSession) {
+        header('Location: index.php');
+        exit;
+    }
     http_response_code(403);
     die('Invalid authentication payload');
 }
 
 // Generate new authenticated session token for phpMyAdmin session checker
 $sessionToken = bin2hex(random_bytes(16));
-$sessionDir = '/var/www/phpmyadmin/tmp/sessions';
-if (!is_dir($sessionDir)) {
-    @mkdir($sessionDir, 0700, true);
-}
-
 $sessionData = [
     'token' => $sessionToken,
-    'db_user' => $payload['db_user'],
-    'db_pass' => $payload['db_pass'],
-    'db_name' => $payload['db_name'] ?? '',
+    'db_user' => (string)$payload['db_user'],
+    'db_pass' => (string)$payload['db_pass'],
+    'db_name' => (string)($payload['db_name'] ?? ''),
     'created_at' => time(),
     'expires_at' => time() + 900
 ];
 
-file_put_contents($sessionDir . '/sess_' . $sessionToken . '.json', json_encode($sessionData), LOCK_EX);
+@file_put_contents($sessionDir . '/sess_' . $sessionToken . '.json', json_encode($sessionData), LOCK_EX);
+@chmod($sessionDir . '/sess_' . $sessionToken . '.json', 0666);
 
 // Set secure session cookie
-setcookie('dpanel_pma_auth', $sessionToken, [
+@setcookie('dpanel_pma_auth', $sessionToken, [
     'expires' => time() + 86400,
     'path' => '/',
     'httponly' => true,
     'samesite' => 'Lax'
 ]);
 
-$redirect = 'index.php' . (!empty($payload['db_name']) ? '?db=' . urlencode($payload['db_name']) : '');
+if (session_status() === PHP_SESSION_NONE) {
+    @session_name('SignonSession');
+    @session_start();
+}
+$_SESSION['PMA_single_signon_user'] = (string)$payload['db_user'];
+$_SESSION['PMA_single_signon_password'] = (string)$payload['db_pass'];
+$_SESSION['PMA_single_signon_host'] = '127.0.0.1';
+$_SESSION['PMA_single_signon_port'] = 3306;
+@session_write_close();
+
+$redirect = 'index.php' . (!empty($payload['db_name']) ? '?db=' . urlencode((string)$payload['db_name']) : '');
 header('Location: ' . $redirect);
 exit;
 PMASSO
@@ -1093,7 +1181,7 @@ server {
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         fastcgi_param PATH_INFO \$fastcgi_path_info;
-        fastcgi_param PHP_ADMIN_VALUE "open_basedir=/var/www/phpmyadmin/:/tmp/:/proc/:/dev/urandom";
+        fastcgi_param PHP_ADMIN_VALUE "open_basedir=/var/www/phpmyadmin/:/etc/dpanel/:/tmp/:/proc/:/dev/urandom";
         fastcgi_read_timeout 300;
         fastcgi_buffer_size 128k;
         fastcgi_buffers 4 256k;
@@ -1107,73 +1195,11 @@ NGINXCONF
 
 ln -sf /etc/nginx/sites-available/phpmyadmin.conf /etc/nginx/sites-enabled/phpmyadmin.conf
 
-# ------------------------------------------------------------------------------
-# 9. elFinder File Manager - Port 8089 (Embedded in dPanel Binary)
-# ------------------------------------------------------------------------------
-log_info "Configuring elFinder File Manager vhost on port 8089..."
+# Ensure website root directory permissions
+mkdir -p /www/wwwroot
+chmod -R 775 /www /www/wwwroot 2>/dev/null || true
+chown -R www-data:www-data /www /www/wwwroot 2>/dev/null || true
 
-ELFINDER_WEB_DIR="/var/www/elfinder"
-mkdir -p "$ELFINDER_WEB_DIR"
-mkdir -p /tmp/.elfinder_tmb
-chown -R www-data:www-data "${ELFINDER_WEB_DIR}" /tmp/.elfinder_tmb 2>/dev/null || true
-chmod 777 /tmp/.elfinder_tmb 2>/dev/null || true
-chmod 755 "${ELFINDER_WEB_DIR}" 2>/dev/null || true
-
-# Allow firewall for elFinder port 8089
-if command -v ufw &>/dev/null; then
-    ufw allow 8089/tcp 2>/dev/null || true
-fi
-if command -v iptables &>/dev/null; then
-    iptables -I INPUT -p tcp --dport 8089 -j ACCEPT 2>/dev/null || true
-fi
-
-# Nginx vhost for elFinder on port 8089
-cat > /etc/nginx/sites-available/elfinder.conf << ELFNGINX
-server {
-    listen 8089;
-    server_name _;
-    root ${ELFINDER_WEB_DIR};
-    index index.php index.html;
-    client_max_body_size 1024M;
-
-    add_header Access-Control-Allow-Origin * always;
-    add_header Access-Control-Allow-Methods 'GET, POST, OPTIONS, HEAD, PUT, DELETE' always;
-    add_header Access-Control-Allow-Headers '*' always;
-
-    location / {
-        if (\$request_method = 'OPTIONS') {
-            add_header Access-Control-Allow-Origin * always;
-            add_header Access-Control-Allow-Methods 'GET, POST, OPTIONS, HEAD, PUT, DELETE' always;
-            add_header Access-Control-Allow-Headers '*' always;
-            return 204;
-        }
-        try_files \$uri \$uri/ /index.php?\$args;
-    }
-
-    # Block direct HTTP access to internal PHP libraries
-    location ^~ /php/ {
-        deny all;
-    }
-
-    location ~ \.php\$ {
-        include fastcgi_params;
-        fastcgi_pass unix:${PHP_SOCK};
-        fastcgi_index index.php;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_param PATH_INFO \$fastcgi_path_info;
-        fastcgi_read_timeout 300;
-        fastcgi_buffer_size 128k;
-        fastcgi_buffers 4 256k;
-    }
-
-    location ~ /\. {
-        deny all;
-    }
-}
-ELFNGINX
-
-ln -sf /etc/nginx/sites-available/elfinder.conf /etc/nginx/sites-enabled/elfinder.conf
-log_info "elFinder File Manager configured on port 8089 using PHP-FPM socket (${PHP_SOCK})."
 
 
 # Provision Port 80 Default Welcome Landing Page
@@ -1276,7 +1302,8 @@ if command -v iptables &>/dev/null; then
 fi
 
 chown -R www-data:www-data /var/www/phpmyadmin /var/www/html /var/www/dpanel-acme-challenge 2>/dev/null || true
-chmod 644 /var/www/phpmyadmin/config.inc.php /var/www/phpmyadmin/sso.php /var/www/phpmyadmin/signon_checker.php 2>/dev/null || true
+chmod 644 /var/www/phpmyadmin/config.inc.php /var/www/phpmyadmin/sso.php /var/www/phpmyadmin/signon_checker.php /var/www/phpmyadmin/panel_config.php 2>/dev/null || true
+chmod 777 /var/www/phpmyadmin/tmp /var/www/phpmyadmin/tmp/sessions 2>/dev/null || true
 if command -v systemctl &>/dev/null; then
     systemctl restart php*-fpm php-fpm 2>/dev/null || true
     nginx -t && systemctl restart nginx || systemctl restart nginx || true
@@ -1316,16 +1343,6 @@ ENVEOF
     chmod 600 /etc/dpanel/.env
 fi
 
-# Provision isolated /var/www/elfinder/.env with JWT_SECRET for PHP-FPM elFinder session authentication
-ACTIVE_JWT_SECRET=$(grep -E '^JWT_SECRET=' /etc/dpanel/.env 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
-ACTIVE_PANEL_PORT=$(grep -E '^PANEL_PORT=' /etc/dpanel/.env 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
-mkdir -p /var/www/elfinder
-cat > /var/www/elfinder/.env <<ELFNV
-JWT_SECRET="${ACTIVE_JWT_SECRET}"
-PANEL_PORT=${ACTIVE_PANEL_PORT}
-ELFNV
-chown www-data:www-data /var/www/elfinder/.env 2>/dev/null || true
-chmod 600 /var/www/elfinder/.env
 
 
 # ------------------------------------------------------------------------------

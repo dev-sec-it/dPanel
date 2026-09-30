@@ -289,7 +289,10 @@ if [ "$DO_CLEAN_REINSTALL" = true ]; then
 
     # 7. Remove all previous dPanel files, directories, sockets, and configurations
     log_info "Removing previous configuration files, sockets, and binaries..."
-    rm -rf /etc/dpanel /var/dpanel /run/dpanel /run/dpanel.sock /var/log/dpanel /tmp/dpanel* /tmp/dpanel_install /tmp/pma.tar.gz 2>/dev/null || true
+    rm -rf /etc/dpanel /var/dpanel /run/dpanel /run/dpanel.sock /var/log/dpanel /tmp/dpanel_install /tmp/pma.tar.gz 2>/dev/null || true
+    if [ "$SCRIPT_DIR" != "/tmp/dpanel" ] && [ "$SCRIPT_DIR" != "/tmp/dpanel-installer" ]; then
+        rm -rf /tmp/dpanel /tmp/dpanel-installer 2>/dev/null || true
+    fi
     rm -f /usr/local/bin/dpaneld /usr/local/bin/dpanel-server 2>/dev/null || true
     rm -rf /etc/bind/zones /etc/bind/named.conf.local /etc/pure-ftpd/pureftpd.pdb /etc/pure-ftpd/passwd /etc/pure-ftpd/conf 2>/dev/null || true
 
@@ -408,10 +411,12 @@ exit 0
 EOF
     fi
     chmod 755 /etc/mysql/debian-start 2>/dev/null || true
+    export DEBIAN_FRONTEND=noninteractive
+    export UCF_FORCE_CONFFOLD=1
     dpkg --configure -a 2>/dev/null || true
 
     apt-get update -y -q 2>/dev/null || apt-get update -y || true
-    if ! apt-get install -y --no-install-recommends \
+    if ! apt-get -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" install -y --no-install-recommends \
         postgresql \
         postgresql-contrib \
         libpq5 \
@@ -437,9 +442,9 @@ EOF
         log_warn "Fixing dpkg package dependencies and retrying..."
         touch /etc/mysql/mariadb.cnf
         chmod 644 /etc/mysql/mariadb.cnf
-        dpkg --configure -a || true
-        apt-get install -f -y
-        apt-get install -y --no-install-recommends \
+        dpkg --configure -a 2>/dev/null || true
+        apt-get -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" install -f -y
+        apt-get -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" install -y --no-install-recommends \
             postgresql \
             postgresql-contrib \
             libpq5 \
@@ -752,21 +757,25 @@ log_info "Database setup completed."
 # ------------------------------------------------------------------------------
 log_info "Setting up MariaDB & phpMyAdmin with 1-Click SSO on Port 888..."
 
-mkdir -p /run/mysqld /var/lib/mysql /var/log/mysql
-chown -R mysql:mysql /run/mysqld /var/lib/mysql /var/log/mysql 2>/dev/null || true
+mkdir -p /run/mysqld /var/lib/mysql /var/lib/mariadb /var/log/mysql
+chage -E -1 mysql 2>/dev/null || true
+usermod -s /bin/sh mysql 2>/dev/null || true
+chown -R mysql:mysql /run/mysqld /var/lib/mysql /var/lib/mariadb /var/log/mysql 2>/dev/null || true
 chmod 755 /run/mysqld
 
 if command -v systemctl &>/dev/null; then
     systemctl unmask mariadb mysql 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
     
-    # Initialize MariaDB data directory if missing
-    if [ ! -d "/var/lib/mysql/mysql" ]; then
+    # Initialize MariaDB system database tables if missing
+    if [ ! -d "/var/lib/mysql/mysql" ] && [ ! -d "/var/lib/mariadb/mysql" ]; then
         if command -v mariadb-install-db &>/dev/null; then
-            mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null 2>&1 || true
+            su - mysql -s /bin/sh -c 'mariadb-install-db --datadir=/var/lib/mysql' >/dev/null 2>&1 || mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null 2>&1 || true
         elif command -v mysql_install_db &>/dev/null; then
-            mysql_install_db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null 2>&1 || true
+            su - mysql -s /bin/sh -c 'mysql_install_db --datadir=/var/lib/mysql' >/dev/null 2>&1 || mysql_install_db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null 2>&1 || true
         fi
+        cp -rn /var/lib/mysql/* /var/lib/mariadb/ 2>/dev/null || true
+        chown -R mysql:mysql /var/lib/mysql /var/lib/mariadb 2>/dev/null || true
     fi
     
     if [ ! -f /etc/mysql/debian-start ]; then
@@ -780,8 +789,10 @@ EOF
     systemctl enable mariadb 2>/dev/null || systemctl enable mysql 2>/dev/null || true
     systemctl restart mariadb 2>/dev/null || systemctl restart mysql 2>/dev/null || true
 elif command -v rc-service &>/dev/null; then
-    if [ ! -d "/var/lib/mysql/mysql" ]; then
-        mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null 2>&1 || true
+    if [ ! -d "/var/lib/mysql/mysql" ] && [ ! -d "/var/lib/mariadb/mysql" ]; then
+        su - mysql -s /bin/sh -c 'mariadb-install-db --datadir=/var/lib/mysql' >/dev/null 2>&1 || mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null 2>&1 || true
+        cp -rn /var/lib/mysql/* /var/lib/mariadb/ 2>/dev/null || true
+        chown -R mysql:mysql /var/lib/mysql /var/lib/mariadb 2>/dev/null || true
     fi
     rc-service mariadb restart 2>/dev/null || true
 fi

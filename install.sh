@@ -94,9 +94,27 @@ generate_dynamic_username() {
 CLI_ACTION=""
 CLI_PORT=""
 CLI_USER=""
+ASSUME_YES=false
+
+# True only when it is safe to stop and ask the operator something.
+# -y always wins, so an unattended update can never block on a read even if it
+# happens to be handed a terminal. Everything else falls back to TTY sniffing.
+can_prompt() {
+    if [ "$ASSUME_YES" = true ]; then
+        return 1
+    fi
+    if [ -t 0 ] || [ -p /dev/stdin ]; then
+        return 0
+    fi
+    return 1
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        -y|--yes|--non-interactive|--silent)
+            ASSUME_YES=true
+            shift
+            ;;
         --fresh|--clean|--reinstall|-f|--purge|--purge-all|--deep-clean)
             CLI_ACTION="fresh"
             shift
@@ -123,7 +141,7 @@ if [ "$DPANEL_EXISTING" = true ]; then
     INSTALL_CHOICE=""
     if [ -n "$CLI_ACTION" ]; then
         INSTALL_CHOICE="$CLI_ACTION"
-    elif [ -t 0 ] || [ -p /dev/stdin ]; then
+    elif can_prompt; then
         echo ""
         echo -e "${BLUE}==================================================================${NC}"
         echo -e "${BLUE}        dPanel Enterprise Installation & Maintenance Mode        ${NC}"
@@ -150,12 +168,21 @@ if [ "$DPANEL_EXISTING" = true ]; then
 
     if [ "$INSTALL_CHOICE" = "fresh" ]; then
         log_warn "WARNING: Fresh Install selected! All previous databases, websites, and settings will be wiped."
-        if [ -t 0 ]; then
+        if can_prompt; then
             read -r -p "Are you sure you want to completely erase existing data? [y/N]: " CONFIRM_WIPE
             if [[ ! "$CONFIRM_WIPE" =~ ^[Yy]$ ]]; then
                 log_info "Operation cancelled by user. Retaining existing installation."
                 exit 0
             fi
+        elif [ "$ASSUME_YES" = true ]; then
+            # Unreachable while INSTALL_CHOICE defaults to "upgrade" under -y, but kept as a
+            # guard so unattended mode can never silently wipe data if that default changes.
+            # Only an explicit --fresh may authorise a destructive reinstall unattended.
+            if [ "$CLI_ACTION" != "fresh" ]; then
+                log_error "Refusing to wipe an existing installation under unattended mode. Re-run with an interactive terminal to confirm, or pass --fresh explicitly."
+                exit 1
+            fi
+            log_warn "Proceeding with Fresh Install unattended because --fresh was requested explicitly."
         fi
         DO_CLEAN_REINSTALL=true
         DO_PURGE_PACKAGES=true
@@ -186,7 +213,7 @@ if [ -z "$PANEL_PORT" ]; then
         PANEL_PORT="$CLI_PORT"
     else
         DYNAMIC_PORT=$(generate_dynamic_port)
-        if [ -t 0 ] || [ -p /dev/stdin ]; then
+        if can_prompt; then
             echo ""
             echo -e "${BLUE}------------------------------------------------------------------${NC}"
             echo -e "${GREEN}[?] Custom Portal Port Configuration${NC}"
@@ -209,7 +236,7 @@ if [ -z "$ADMIN_USER" ]; then
         ADMIN_USER="$CLI_USER"
     else
         DYNAMIC_USER=$(generate_dynamic_username)
-        if [ -t 0 ] || [ -p /dev/stdin ]; then
+        if can_prompt; then
             echo -e "${GREEN}[?] Custom Administrator Username Configuration${NC}"
             echo -e "    Generated Dynamic Username: ${YELLOW}${DYNAMIC_USER}${NC}"
             read -r -p "    Enter username [Press Enter to keep ${DYNAMIC_USER}]: " USER_IN_USER
@@ -809,11 +836,30 @@ done
 
 if [ "$_mysql_ready" -eq 1 ]; then
     log_info "MariaDB is active and ready."
-    mysql -u root -e "CREATE USER IF NOT EXISTS 'dpanel_admin'@'localhost' IDENTIFIED BY 'dPanel_MySQL_Pass_2026!';" 2>/dev/null || true
-    mysql -u root -e "CREATE USER IF NOT EXISTS 'dpanel_admin'@'127.0.0.1' IDENTIFIED BY 'dPanel_MySQL_Pass_2026!';" 2>/dev/null || true
-    mysql -u root -e "GRANT ALL PRIVILEGES ON *.* TO 'dpanel_admin'@'localhost' WITH GRANT OPTION; GRANT ALL PRIVILEGES ON *.* TO 'dpanel_admin'@'127.0.0.1' WITH GRANT OPTION; FLUSH PRIVILEGES;" 2>/dev/null || true
+    # NOTE: CREATE USER IF NOT EXISTS is a no-op when the account already exists, so a
+    # stale password would never be corrected and phpMyAdmin SSO would fail with an
+    # endless index.php <-> sso.php redirect loop. Drop first, then recreate, so the
+    # credential always matches what databases.rs hands to the signon script.
+    if ! mysql -u root -e "
+        DROP USER IF EXISTS 'dpanel_admin'@'localhost';
+        DROP USER IF EXISTS 'dpanel_admin'@'127.0.0.1';
+        CREATE USER 'dpanel_admin'@'localhost' IDENTIFIED BY 'dPanel_MySQL_Pass_2026!';
+        CREATE USER 'dpanel_admin'@'127.0.0.1' IDENTIFIED BY 'dPanel_MySQL_Pass_2026!';
+        GRANT ALL PRIVILEGES ON *.* TO 'dpanel_admin'@'localhost' WITH GRANT OPTION;
+        GRANT ALL PRIVILEGES ON *.* TO 'dpanel_admin'@'127.0.0.1' WITH GRANT OPTION;
+        FLUSH PRIVILEGES;"; then
+        log_error "Failed to provision the 'dpanel_admin' MySQL account. phpMyAdmin single sign-on will not work."
+    fi
+    # Verify the credential the way phpMyAdmin will actually use it (TCP, not socket).
+    # MariaDB resolves 127.0.0.1 to the 'localhost' account unless skip-name-resolve is on.
+    if mysql -h 127.0.0.1 -P 3306 -u dpanel_admin -p'dPanel_MySQL_Pass_2026!' -e "SELECT 1;" >/dev/null 2>&1; then
+        log_info "Verified 'dpanel_admin' can authenticate over TCP (phpMyAdmin SSO ready)."
+    else
+        log_error "'dpanel_admin' cannot authenticate over TCP. phpMyAdmin SSO will loop instead of logging in."
+    fi
 else
     log_warn "MariaDB is starting up. Check status with: systemctl status mariadb"
+    log_error "MariaDB never became ready; skipping 'dpanel_admin' provisioning. phpMyAdmin SSO will not work."
 fi
 
 if [ ! -f "/var/www/phpmyadmin/index.php" ] || [ ! -f "/var/www/phpmyadmin/vendor/autoload.php" ]; then
@@ -973,6 +1019,9 @@ if (!is_dir($sessionDir)) {
 // Check if client already possesses an active valid session
 $cookieName = 'dpanel_pma_auth';
 $hasActiveSession = false;
+// phpMyAdmin records why it bounced back to SignonURL; captured so a failed login can be
+// reported instead of being retried forever.
+$lastAuthError = '';
 if (!empty($_COOKIE[$cookieName])) {
     $token = trim((string)$_COOKIE[$cookieName]);
     if (preg_match('/^[0-9a-fA-F]{32}$/', $token)) {
@@ -992,6 +1041,9 @@ if (!empty($_COOKIE[$cookieName])) {
                         $_SESSION['PMA_single_signon_password'] = (string)$data['db_pass'];
                         $_SESSION['PMA_single_signon_host'] = '127.0.0.1';
                         $_SESSION['PMA_single_signon_port'] = 3306;
+                        $lastAuthError = isset($_SESSION['PMA_single_signon_error_message'])
+                            ? trim((string)$_SESSION['PMA_single_signon_error_message'])
+                            : '';
                         @session_write_close();
                     }
                 }
@@ -1002,9 +1054,80 @@ if (!empty($_COOKIE[$cookieName])) {
 
 $ticket = isset($_GET['ticket']) ? trim((string)$_GET['ticket']) : '';
 
+// Render a diagnosable failure page. phpMyAdmin's auth_type=signon redirects back to
+// SignonURL whenever it cannot authenticate, so blindly bouncing to index.php again would
+// trap the browser in an endless loop (ERR_TOO_MANY_REDIRECTS) with no explanation.
+function dpanel_sso_failure(string $title, string $detail, bool $showSqlFix = false): void {
+    global $panelPort;
+    http_response_code(403);
+    header('Content-Type: text/html; charset=utf-8');
+    $host = !empty($_SERVER['HTTP_HOST']) ? explode(':', $_SERVER['HTTP_HOST'])[0] : 'localhost';
+    // Built with double quotes because the page markup below lives in a single-quoted string.
+    $sqlFix = "CREATE USER 'dpanel_admin'@'localhost' IDENTIFIED BY 'dPanel_MySQL_Pass_2026!';\n"
+        . "CREATE USER 'dpanel_admin'@'127.0.0.1' IDENTIFIED BY 'dPanel_MySQL_Pass_2026!';\n"
+        . "GRANT ALL PRIVILEGES ON *.* TO 'dpanel_admin'@'localhost' WITH GRANT OPTION;\n"
+        . "GRANT ALL PRIVILEGES ON *.* TO 'dpanel_admin'@'127.0.0.1' WITH GRANT OPTION;\n"
+        . "FLUSH PRIVILEGES;";
+    // Only offer the account repair SQL when the database actually rejected the login,
+    // otherwise it is noise that does not apply to the visitor's situation.
+    $sqlBlock = $showSqlFix
+        ? '<code>' . htmlspecialchars($sqlFix) . '</code>'
+        : '';
+    echo '<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>' . htmlspecialchars($title) . ' - dPanel phpMyAdmin SSO</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8fafc; color: #1e293b; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); padding: 2.5rem; max-width: 560px; text-align: center; }
+        .badge { display: inline-block; padding: 4px 12px; background: #fee2e2; color: #ef4444; font-weight: 600; font-size: 0.875rem; border-radius: 9999px; margin-bottom: 1rem; }
+        h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.75rem; }
+        p { color: #64748b; font-size: 0.875rem; line-height: 1.6; margin-bottom: 1rem; }
+        code { display: block; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 6px; padding: 0.75rem; margin: 1rem 0; font-size: 0.8125rem; color: #0f172a; text-align: left; white-space: pre-wrap; overflow-x: auto; }
+        .btn { display: inline-block; background: #16a34a; color: #ffffff; padding: 0.625rem 1.25rem; border-radius: 6px; font-weight: 500; font-size: 0.875rem; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="badge">403 Forbidden</div>
+        <h1>' . htmlspecialchars($title) . '</h1>
+        <p>' . $detail . '</p>
+        ' . $sqlBlock . '
+        <a href="http://' . htmlspecialchars($host) . ':' . (int)$panelPort . '/databases" class="btn">Return to dPanel</a>
+    </div>
+</body>
+</html>';
+    exit;
+}
+
 // If no ticket provided, but already authenticated, enter phpMyAdmin directly
 if (empty($ticket) || !preg_match('/^[0-9a-fA-F-]{36}$/', $ticket)) {
     if ($hasActiveSession) {
+        // Bounce guard: if we already sent this client to index.php during this sign-on
+        // attempt and it came back here, index.php could not authenticate. Redirecting a
+        // second time is what produces ERR_TOO_MANY_REDIRECTS.
+        if (!empty($_COOKIE['dpanel_pma_bounce'])) {
+            @setcookie('dpanel_pma_bounce', '', ['expires' => time() - 3600, 'path' => '/', 'httponly' => true, 'samesite' => 'Lax']);
+            // phpMyAdmin only records a reason when the database itself refused the
+            // connection. With no reason on record the earlier bounce was caused by
+            // something that has since been fixed (a repaired account, an expired
+            // session), so retry once instead of showing an error we cannot justify.
+            // This keeps the loop bounded: a genuinely broken database still sets the
+            // error and lands on the diagnostic page below.
+            if ($lastAuthError === '') {
+                header('Location: index.php');
+                exit;
+            }
+            dpanel_sso_failure(
+                'phpMyAdmin could not sign in',
+                'The database server rejected the credentials dPanel issued, so phpMyAdmin could '
+                . 'not log in. This is usually a missing or stale <code>dpanel_admin</code> MySQL '
+                . 'account. phpMyAdmin reported: <strong>' . htmlspecialchars($lastAuthError) . '</strong>',
+                true
+            );
+        }
+        @setcookie('dpanel_pma_bounce', '1', ['expires' => time() + 300, 'path' => '/', 'httponly' => true, 'samesite' => 'Lax']);
         header('Location: index.php');
         exit;
     }
@@ -1130,6 +1253,9 @@ $sessionData = [
     'samesite' => 'Lax'
 ]);
 
+// Fresh sign-on succeeded, so drop any bounce marker left by an earlier failed attempt.
+@setcookie('dpanel_pma_bounce', '', ['expires' => time() - 3600, 'path' => '/', 'httponly' => true, 'samesite' => 'Lax']);
+
 if (session_status() === PHP_SESSION_NONE) {
     @session_name('SignonSession');
     @session_start();
@@ -1138,6 +1264,8 @@ $_SESSION['PMA_single_signon_user'] = (string)$payload['db_user'];
 $_SESSION['PMA_single_signon_password'] = (string)$payload['db_pass'];
 $_SESSION['PMA_single_signon_host'] = '127.0.0.1';
 $_SESSION['PMA_single_signon_port'] = 3306;
+// Clear any error left over from a previous failed attempt.
+unset($_SESSION['PMA_single_signon_error_message']);
 @session_write_close();
 
 $redirect = 'index.php' . (!empty($payload['db_name']) ? '?db=' . urlencode((string)$payload['db_name']) : '');
@@ -1393,6 +1521,18 @@ fi
 chown -R www-data:www-data /var/www/phpmyadmin /var/www/html /var/www/dpanel-acme-challenge 2>/dev/null || true
 chmod 644 /var/www/phpmyadmin/config.inc.php /var/www/phpmyadmin/sso.php /var/www/phpmyadmin/signon_checker.php /var/www/phpmyadmin/panel_config.php 2>/dev/null || true
 chmod 777 /var/www/phpmyadmin/tmp /var/www/phpmyadmin/tmp/sessions 2>/dev/null || true
+
+# Keep the single sign-on files outside the phpMyAdmin webroot as the master copy.
+# The App Store "uninstall" removes /var/www/phpmyadmin wholesale and its "install" only
+# unpacks the upstream tarball, so without this the SSO wiring would be destroyed by an
+# uninstall and never recreated, leaving the panel pointing at a 404 /sso.php.
+mkdir -p /etc/dpanel/pma-sso
+cp -f /var/www/phpmyadmin/config.inc.php /var/www/phpmyadmin/sso.php \
+      /var/www/phpmyadmin/signon_checker.php /var/www/phpmyadmin/panel_config.php \
+      /etc/dpanel/pma-sso/ 2>/dev/null || true
+# The :888 vhost is part of the same wiring, so keep a copy to restore on reinstall.
+cp -f /etc/nginx/sites-available/phpmyadmin.conf /etc/dpanel/pma-sso/phpmyadmin.conf 2>/dev/null || true
+chmod 600 /etc/dpanel/pma-sso/*.php 2>/dev/null || true
 if command -v systemctl &>/dev/null; then
     systemctl restart php*-fpm php-fpm 2>/dev/null || true
     nginx -t && systemctl restart nginx || systemctl restart nginx || true

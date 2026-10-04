@@ -402,8 +402,9 @@ if [ "$PKG_MANAGER" = "apt" ]; then
     apt-get install -y --no-install-recommends software-properties-common ca-certificates curl gnupg 2>/dev/null || true
     if [ "$OS_ID" = "ubuntu" ]; then
         mkdir -p /etc/apt/keyrings
-        curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x71DAEAAB4AD4CAB6" \
-            | gpg --dearmor -o /etc/apt/keyrings/ondrej-php.gpg 2>/dev/null || true
+        rm -f /etc/apt/keyrings/ondrej-php.gpg
+        (curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x71DAEAAB4AD4CAB6" \
+            | gpg --dearmor --yes --batch -o /etc/apt/keyrings/ondrej-php.gpg 2>/dev/null) || true
         UBUNTU_CODENAME="${VERSION_CODENAME:-noble}"
         PPA_CHECK=$(curl -s -o /dev/null -w "%{http_code}" "https://ppa.launchpadcontent.net/ondrej/php/ubuntu/dists/${UBUNTU_CODENAME}/Release")
         if [ "$PPA_CHECK" != "200" ]; then

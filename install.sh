@@ -1375,6 +1375,25 @@ if [ -f /etc/nginx/nginx.conf ]; then
     fi
 fi
 
+# ------------------------------------------------------------------------------
+# 9b. Front proxy routing directory (Apache / Caddy sites behind nginx)
+#
+# nginx stays the single public entrypoint on :80 / :443. Sites assigned to
+# Apache or Caddy are served by those engines on their own loopback ports, and
+# dPanel writes a routing vhost per domain into this directory. Nothing is
+# generated here - the daemon creates these entries as sites are assigned.
+# ------------------------------------------------------------------------------
+mkdir -p /etc/nginx/dpanel-proxy /var/log/caddy
+if [ ! -f /etc/nginx/sites-available/dpanel-proxy.conf ]; then
+    cat > /etc/nginx/sites-available/dpanel-proxy.conf <<'DPPCONF'
+# dPanel front proxy routing.
+# Maps Apache (8080) and Caddy (8081) sites to their backend ports while nginx
+# keeps serving :80 and :443 directly. Managed by dPanel - do not edit by hand.
+include /etc/nginx/dpanel-proxy/*.conf;
+DPPCONF
+fi
+ln -sf /etc/nginx/sites-available/dpanel-proxy.conf /etc/nginx/sites-enabled/dpanel-proxy.conf 2>/dev/null || true
+
 # Remove duplicate default servers from conf.d and sites-available
 rm -f /etc/nginx/conf.d/phpmyadmin.conf /etc/nginx/conf.d/default.conf /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default 2>/dev/null || true
 

@@ -443,6 +443,17 @@ EOF
     export UCF_FORCE_CONFFOLD=1
     dpkg --configure -a 2>/dev/null || true
 
+    # Web server packages resolution:
+    # On fresh install: Apache HTTP Server is the default web engine.
+    # On upgrade: DO NOT install or change web server packages (preserve existing engine untouched).
+    WEB_PACKAGES=()
+    if [ "$INSTALL_MODE" != "upgrade" ]; then
+        log_info "Fresh install: installing Apache HTTP Server as default web engine..."
+        WEB_PACKAGES=(apache2 apache2-utils)
+    else
+        log_info "Upgrade mode: preserving existing web server engine (no web server package changes)..."
+    fi
+
     apt-get update -y -q 2>/dev/null || apt-get update -y || true
     if ! apt-get -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" install -y --no-install-recommends \
         postgresql \
@@ -450,9 +461,7 @@ EOF
         libpq5 \
         mariadb-server \
         mariadb-client \
-        nginx \
         certbot \
-        python3-certbot-nginx \
         php-fpm \
         php-mysql \
         php-mbstring \
@@ -466,7 +475,8 @@ EOF
         tar \
         gzip \
         bash \
-        procps; then
+        procps \
+        "${WEB_PACKAGES[@]}"; then
         log_warn "Fixing dpkg package dependencies and retrying..."
         touch /etc/mysql/mariadb.cnf
         chmod 644 /etc/mysql/mariadb.cnf
@@ -478,9 +488,7 @@ EOF
             libpq5 \
             mariadb-server \
             mariadb-client \
-            nginx \
             certbot \
-            python3-certbot-nginx \
             php-fpm \
             php-mysql \
             php-mbstring \
@@ -494,9 +502,14 @@ EOF
             tar \
             gzip \
             bash \
-            procps
+            procps \
+            "${WEB_PACKAGES[@]}"
     fi
 elif [ "$PKG_MANAGER" = "apk" ]; then
+    APK_WEB_PKGS=""
+    if [ "$INSTALL_MODE" != "upgrade" ]; then
+        APK_WEB_PKGS="apache2 apache2-utils"
+    fi
     apk update -q
     apk add --no-cache \
         postgresql16 \
@@ -504,7 +517,7 @@ elif [ "$PKG_MANAGER" = "apk" ]; then
         libpq \
         mariadb \
         mariadb-client \
-        nginx \
+        $APK_WEB_PKGS \
         php83-fpm \
         php83-mysqli \
         php83-mbstring \
@@ -1394,53 +1407,57 @@ DPPCONF
 fi
 ln -sf /etc/nginx/sites-available/dpanel-proxy.conf /etc/nginx/sites-enabled/dpanel-proxy.conf 2>/dev/null || true
 
-# Remove duplicate default servers from conf.d and sites-available
-rm -f /etc/nginx/conf.d/phpmyadmin.conf /etc/nginx/conf.d/default.conf /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default 2>/dev/null || true
-
-# Provision Port 888 phpMyAdmin VHost
-cat > /etc/nginx/sites-available/phpmyadmin.conf <<NGINXCONF
-server {
-    listen 888 default_server;
-    listen [::]:888 default_server;
-    server_name _;
-    root /var/www/phpmyadmin;
-    index index.php index.html;
-
-    client_max_body_size 256M;
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$args;
-    }
-
-    location ~ \.php$ {
-        include fastcgi_params;
-        fastcgi_pass unix:${PHP_SOCK};
-        fastcgi_index index.php;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_param PATH_INFO \$fastcgi_path_info;
-        fastcgi_param PHP_ADMIN_VALUE "open_basedir=/var/www/phpmyadmin/:/etc/dpanel/:/tmp/:/proc/:/dev/urandom";
-        fastcgi_read_timeout 300;
-        fastcgi_buffer_size 128k;
-        fastcgi_buffers 4 256k;
-    }
-
-    location ~ /\. {
-        deny all;
-    }
-}
-NGINXCONF
-
-ln -sf /etc/nginx/sites-available/phpmyadmin.conf /etc/nginx/sites-enabled/phpmyadmin.conf
-
 # Ensure website root directory permissions
-mkdir -p /www/wwwroot
+mkdir -p /www/wwwroot /var/www/html /var/www/dpanel-acme-challenge
 chmod -R 775 /www /www/wwwroot 2>/dev/null || true
 chown -R www-data:www-data /www /www/wwwroot 2>/dev/null || true
 
+chown -R www-data:www-data /var/www/phpmyadmin /var/www/html /var/www/dpanel-acme-challenge 2>/dev/null || true
+chmod 644 /var/www/phpmyadmin/config.inc.php /var/www/phpmyadmin/sso.php /var/www/phpmyadmin/signon_checker.php /var/www/phpmyadmin/panel_config.php 2>/dev/null || true
+chmod 777 /var/www/phpmyadmin/tmp /var/www/phpmyadmin/tmp/sessions 2>/dev/null || true
 
+# Keep the single sign-on files outside the phpMyAdmin webroot as the master copy.
+mkdir -p /etc/dpanel/pma-sso
+cp -f /var/www/phpmyadmin/config.inc.php /var/www/phpmyadmin/sso.php \
+      /var/www/phpmyadmin/signon_checker.php /var/www/phpmyadmin/panel_config.php \
+      /etc/dpanel/pma-sso/ 2>/dev/null || true
+chmod 600 /etc/dpanel/pma-sso/*.php 2>/dev/null || true
 
-# Provision Port 80 Default Welcome Landing Page
-cat > /var/www/html/index.html <<HTMLEOF
+# Web Server Configuration:
+# On UPGRADE: PRESERVE existing web server configuration (do NOT touch Nginx, Apache, or Caddy)!
+# On FRESH INSTALL: Configure default Apache HTTP Server!
+if [ "$INSTALL_MODE" != "upgrade" ]; then
+    log_info "Fresh install: configuring default Apache HTTP Server..."
+    mkdir -p /etc/apache2/sites-available /etc/apache2/sites-enabled /etc/apache2/conf-available
+
+    # 1. Ports Configuration for Standalone Apache
+    printf '# Managed by dPanel.\nListen 80\nListen 888\n\n<IfModule ssl_module>\n    Listen 443\n</IfModule>\n' > /etc/apache2/ports.conf 2>/dev/null || true
+    echo "ServerName 127.0.0.1" > /etc/apache2/conf-available/servername.conf 2>/dev/null || true
+    a2enconf servername 2>/dev/null || true
+    a2enmod rewrite ssl proxy proxy_fcgi headers alias mime 2>/dev/null || true
+
+    # 2. Provision Port 888 phpMyAdmin VHost for Apache
+    cat > /etc/apache2/sites-available/phpmyadmin.conf <<PMAAPACHE
+<VirtualHost *:888>
+    ServerName phpmyadmin
+    DocumentRoot /var/www/phpmyadmin
+    <Directory /var/www/phpmyadmin>
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+    <FilesMatch \.php$>
+        SetHandler "proxy:unix:${PHP_SOCK}|fcgi://localhost"
+    </FilesMatch>
+    CustomLog /var/log/apache2/phpmyadmin.access.log combined
+    ErrorLog /var/log/apache2/phpmyadmin.error.log
+</VirtualHost>
+PMAAPACHE
+    a2ensite phpmyadmin 2>/dev/null || true
+    cp -f /etc/apache2/sites-available/phpmyadmin.conf /etc/dpanel/pma-sso/phpmyadmin.conf 2>/dev/null || true
+
+    # 3. Provision Default Welcome Landing Page on Port 80
+    cat > /var/www/html/index.html <<HTMLEOF
 <!DOCTYPE html>
 <html>
 <head>
@@ -1459,7 +1476,7 @@ cat > /var/www/html/index.html <<HTMLEOF
     <div class="box">
         <div class="logo">dPanel Enterprise</div>
         <h2>Web Server is Online</h2>
-        <p>The high-performance Nginx web server is operational. Manage your websites, domains, SSL, Node.js applications, and databases from your control panel.</p>
+        <p>The enterprise Apache HTTP Server is operational. Manage your websites, domains, SSL, and databases from your control panel.</p>
         <a href="http://127.0.0.1:${PANEL_PORT}" class="btn" id="pnlLink">Open Control Panel</a>
     </div>
     <script>
@@ -1469,60 +1486,35 @@ cat > /var/www/html/index.html <<HTMLEOF
 </html>
 HTMLEOF
 
-# Generate default fallback self-signed SSL for Nginx default server
-mkdir -p /etc/ssl/dpanel/certs /etc/ssl/dpanel/private
-if [ ! -f /etc/ssl/dpanel/default.crt ] || [ ! -f /etc/ssl/dpanel/default.key ]; then
-    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-        -keyout /etc/ssl/dpanel/default.key \
-        -out /etc/ssl/dpanel/default.crt \
-        -subj "/C=US/ST=State/L=City/O=dPanel/CN=localhost" 2>/dev/null || true
-    chmod 600 /etc/ssl/dpanel/default.key 2>/dev/null || true
-    chmod 644 /etc/ssl/dpanel/default.crt 2>/dev/null || true
+    cat > /etc/apache2/sites-available/000-default.conf <<'APACHEDEF'
+<VirtualHost *:80>
+    ServerName localhost
+    DocumentRoot /var/www/html
+    DirectoryIndex index.html index.php
+
+    <Directory /var/www/html>
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    Alias /.well-known/acme-challenge/ "/var/www/dpanel-acme-challenge/.well-known/acme-challenge/"
+    <Directory "/var/www/dpanel-acme-challenge/.well-known/acme-challenge/">
+        AllowOverride None
+        Require all granted
+    </Directory>
+</VirtualHost>
+APACHEDEF
+    a2ensite 000-default 2>/dev/null || true
+
+    if command -v systemctl &>/dev/null; then
+        systemctl unmask apache2 2>/dev/null || true
+        systemctl enable apache2 2>/dev/null || true
+        systemctl restart apache2 || systemctl start apache2 || true
+    fi
+else
+    log_info "Upgrade mode: existing web server configuration preserved without modification."
 fi
-
-cat > /etc/nginx/sites-available/default.conf <<'DEFAULTCONF'
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
-    root /var/www/html;
-    index index.html index.php;
-
-    # ACME Challenge location
-    location /.well-known/acme-challenge/ {
-        root /var/www/dpanel-acme-challenge;
-        try_files $uri =404;
-    }
-
-    location / {
-        try_files $uri $uri/ =404;
-    }
-}
-
-server {
-    listen 443 ssl default_server;
-    listen [::]:443 ssl default_server;
-    server_name _;
-    ssl_certificate /etc/ssl/dpanel/default.crt;
-    ssl_certificate_key /etc/ssl/dpanel/default.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-    root /var/www/html;
-    index index.html index.php;
-
-    # ACME Challenge location
-    location /.well-known/acme-challenge/ {
-        root /var/www/dpanel-acme-challenge;
-        try_files $uri =404;
-    }
-
-    location / {
-        try_files $uri $uri/ =404;
-    }
-}
-DEFAULTCONF
-
-ln -sf /etc/nginx/sites-available/default.conf /etc/nginx/sites-enabled/default.conf
 
 # Allow firewall rules
 if command -v ufw &>/dev/null; then
@@ -1538,24 +1530,8 @@ if command -v iptables &>/dev/null; then
     iptables -I INPUT -p tcp --dport "${PANEL_PORT}" -j ACCEPT 2>/dev/null || true
 fi
 
-chown -R www-data:www-data /var/www/phpmyadmin /var/www/html /var/www/dpanel-acme-challenge 2>/dev/null || true
-chmod 644 /var/www/phpmyadmin/config.inc.php /var/www/phpmyadmin/sso.php /var/www/phpmyadmin/signon_checker.php /var/www/phpmyadmin/panel_config.php 2>/dev/null || true
-chmod 777 /var/www/phpmyadmin/tmp /var/www/phpmyadmin/tmp/sessions 2>/dev/null || true
-
-# Keep the single sign-on files outside the phpMyAdmin webroot as the master copy.
-# The App Store "uninstall" removes /var/www/phpmyadmin wholesale and its "install" only
-# unpacks the upstream tarball, so without this the SSO wiring would be destroyed by an
-# uninstall and never recreated, leaving the panel pointing at a 404 /sso.php.
-mkdir -p /etc/dpanel/pma-sso
-cp -f /var/www/phpmyadmin/config.inc.php /var/www/phpmyadmin/sso.php \
-      /var/www/phpmyadmin/signon_checker.php /var/www/phpmyadmin/panel_config.php \
-      /etc/dpanel/pma-sso/ 2>/dev/null || true
-# The :888 vhost is part of the same wiring, so keep a copy to restore on reinstall.
-cp -f /etc/nginx/sites-available/phpmyadmin.conf /etc/dpanel/pma-sso/phpmyadmin.conf 2>/dev/null || true
-chmod 600 /etc/dpanel/pma-sso/*.php 2>/dev/null || true
 if command -v systemctl &>/dev/null; then
     systemctl restart php*-fpm php-fpm 2>/dev/null || true
-    nginx -t && systemctl restart nginx || systemctl restart nginx || true
 fi
 
 # ------------------------------------------------------------------------------
@@ -1641,9 +1617,12 @@ WantedBy=multi-user.target
 SERVICEEOF
 
     systemctl daemon-reload
-    systemctl enable dpaneld dpanel-server nginx mariadb postgresql 2>/dev/null || true
+    systemctl enable dpaneld dpanel-server mariadb postgresql 2>/dev/null || true
     systemctl restart mariadb 2>/dev/null || true
-    systemctl restart nginx 2>/dev/null || true
+    if [ "$INSTALL_MODE" != "upgrade" ]; then
+        systemctl enable apache2 2>/dev/null || true
+        systemctl restart apache2 2>/dev/null || true
+    fi
     systemctl restart dpaneld
     sleep 1
     systemctl restart dpanel-server

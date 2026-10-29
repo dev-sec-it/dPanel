@@ -446,12 +446,11 @@ EOF
     # Web server packages resolution:
     # On fresh install: Apache HTTP Server is the default web engine.
     # On upgrade: DO NOT install or change web server packages (preserve existing engine untouched).
-    WEB_PACKAGES=()
+    WEB_PACKAGES=(nginx apache2 apache2-utils)
     if [ "$INSTALL_MODE" != "upgrade" ]; then
-        log_info "Fresh install: installing Apache HTTP Server as default web engine..."
-        WEB_PACKAGES=(apache2 apache2-utils)
+        log_info "Fresh install: installing Nginx and Apache HTTP Server (Dual Engine Architecture)..."
     else
-        log_info "Upgrade mode: preserving existing web server engine (no web server package changes)..."
+        log_info "Upgrade mode: ensuring Nginx and Apache packages are present..."
     fi
 
     apt-get update -y -q 2>/dev/null || apt-get update -y || true
@@ -1396,16 +1395,14 @@ fi
 # dPanel writes a routing vhost per domain into this directory. Nothing is
 # generated here - the daemon creates these entries as sites are assigned.
 # ------------------------------------------------------------------------------
-mkdir -p /etc/nginx/dpanel-proxy /var/log/caddy
-if [ ! -f /etc/nginx/sites-available/dpanel-proxy.conf ]; then
-    cat > /etc/nginx/sites-available/dpanel-proxy.conf <<'DPPCONF'
+mkdir -p /etc/nginx/dpanel-proxy /var/log/caddy /etc/nginx/conf.d
+cat > /etc/nginx/conf.d/dpanel-proxy.conf <<'DPPCONF'
 # dPanel front proxy routing.
 # Maps Apache (8080) and Caddy (8081) sites to their backend ports while nginx
 # keeps serving :80 and :443 directly. Managed by dPanel - do not edit by hand.
 include /etc/nginx/dpanel-proxy/*.conf;
 DPPCONF
-fi
-ln -sf /etc/nginx/sites-available/dpanel-proxy.conf /etc/nginx/sites-enabled/dpanel-proxy.conf 2>/dev/null || true
+rm -f /etc/nginx/sites-enabled/dpanel-proxy.conf /etc/nginx/sites-available/dpanel-proxy.conf 2>/dev/null || true
 
 # Ensure website root directory permissions
 mkdir -p /www/wwwroot /var/www/html /var/www/dpanel-acme-challenge
@@ -1430,11 +1427,18 @@ if [ "$INSTALL_MODE" != "upgrade" ]; then
     log_info "Fresh install: configuring default Apache HTTP Server..."
     mkdir -p /etc/apache2/sites-available /etc/apache2/sites-enabled /etc/apache2/conf-available
 
-    # 1. Ports Configuration for Standalone Apache
-    printf '# Managed by dPanel.\nListen 80\nListen 888\n\n<IfModule ssl_module>\n    Listen 443\n</IfModule>\n' > /etc/apache2/ports.conf 2>/dev/null || true
+    # 1. Ports Configuration for Apache backend behind Nginx reverse proxy
+    printf '# Managed by dPanel.\n# Apache backend ports behind Nginx reverse proxy\nListen 8080\nListen 8443\n' > /etc/apache2/ports.conf 2>/dev/null || true
     echo "ServerName 127.0.0.1" > /etc/apache2/conf-available/servername.conf 2>/dev/null || true
     a2enconf servername 2>/dev/null || true
-    a2enmod rewrite ssl proxy proxy_fcgi headers alias mime 2>/dev/null || true
+    cat > /etc/apache2/conf-available/dpanel-remoteip.conf <<'REMIP'
+# Managed by dPanel
+RemoteIPHeader X-Forwarded-For
+RemoteIPInternalProxy 127.0.0.1 ::1
+SetEnvIf X-Forwarded-Proto "^https$" HTTPS=on
+REMIP
+    a2enconf dpanel-remoteip 2>/dev/null || true
+    a2enmod remoteip rewrite ssl proxy proxy_fcgi headers alias mime setenvif 2>/dev/null || true
 
     # 2. Provision Port 888 phpMyAdmin VHost for Apache
     cat > /etc/apache2/sites-available/phpmyadmin.conf <<PMAAPACHE
@@ -1708,7 +1712,7 @@ if command -v iptables &>/dev/null; then
     done
     iptables -I INPUT 1 -p tcp --dport 30000:30100 -j ACCEPT 2>/dev/null || true
     iptables -I INPUT 1 -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-    if command -v iptables-save &>/dev/null; then
+    if command -v iptables-save &>/dev/null && [ -d "/etc/iptables" ]; then
         iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
     fi
 fi

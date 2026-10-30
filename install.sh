@@ -599,12 +599,9 @@ for candidate_dir in \
     "/opt/dpanel-src/target/release" \
     "${SCRIPT_DIR}/bin/${ARCH_SUBDIR}" \
     "${SCRIPT_DIR}/bin/${HOST_ARCH}" \
-    "${SCRIPT_DIR}/bin" \
-    "${SCRIPT_DIR}/dist/bin" \
     "/opt/dpanel-src/bin/${ARCH_SUBDIR}" \
-    "/opt/dpanel-src/bin" \
-    "/tmp/dpanel/bin" \
-    "/tmp/dpanel_install/bin"; do
+    "/tmp/dpanel/bin/${ARCH_SUBDIR}" \
+    "/tmp/dpanel_install/bin/${ARCH_SUBDIR}"; do
     if [ -f "${candidate_dir}/dpaneld" ] && [ -f "${candidate_dir}/dpanel-server" ]; then
         chmod 755 "${candidate_dir}/dpaneld" "${candidate_dir}/dpanel-server" 2>/dev/null || true
         

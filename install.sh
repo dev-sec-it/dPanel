@@ -554,6 +554,7 @@ mkdir -p /var/dpanel/backups
 mkdir -p /var/dpanel/ipc
 mkdir -p /var/dpanel/ssl
 mkdir -p /var/dpanel/tools
+mkdir -p /var/dpanel/apps
 mkdir -p /var/log/dpanel
 mkdir -p /etc/dpanel
 mkdir -p /run/dpanel
@@ -562,6 +563,7 @@ mkdir -p /var/www/phpmyadmin/tmp
 mkdir -p /etc/nginx/conf.d
 
 chmod 755 /var/dpanel
+chmod 755 /var/dpanel/apps
 chmod 750 /var/dpanel/backups
 chmod 777 /var/dpanel/ipc
 chmod 755 /run/dpanel

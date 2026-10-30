@@ -398,27 +398,33 @@ if [ "$PKG_MANAGER" = "apt" ]; then
 
     # Configure Ondrej PPA / Sury PHP repository for multi-PHP runtime support (7.4 to 8.5)
     log_info "Configuring multi-PHP runtime upstream repository..."
+    find /etc/apt/sources.list.d/ -name "*ondrej*" -exec rm -f {} \; 2>/dev/null || true
     rm -f /etc/apt/sources.list.d/ondrej-php.list
     apt-get install -y --no-install-recommends software-properties-common ca-certificates curl gnupg 2>/dev/null || true
     if [ "$OS_ID" = "ubuntu" ]; then
-        mkdir -p /etc/apt/keyrings
-        rm -f /etc/apt/keyrings/ondrej-php.gpg
-        (curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x71DAEAAB4AD4CAB6" \
-            | gpg --dearmor --yes --batch -o /etc/apt/keyrings/ondrej-php.gpg 2>/dev/null) || true
         UBUNTU_CODENAME="${VERSION_CODENAME:-noble}"
         PPA_CHECK=$(curl -s -o /dev/null -w "%{http_code}" "https://ppa.launchpadcontent.net/ondrej/php/ubuntu/dists/${UBUNTU_CODENAME}/Release")
-        if [ "$PPA_CHECK" != "200" ]; then
-            log_warn "Ondrej PPA has no release for '${UBUNTU_CODENAME}' (HTTP ${PPA_CHECK}). Falling back to 'noble'."
-            UBUNTU_CODENAME="noble"
+        if [ "$PPA_CHECK" = "200" ]; then
+            log_info "Using Ondrej PPA codename: ${UBUNTU_CODENAME}"
+            mkdir -p /etc/apt/keyrings
+            rm -f /etc/apt/keyrings/ondrej-php.gpg
+            (curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x71DAEAAB4AD4CAB6" \
+                | gpg --dearmor --yes --batch -o /etc/apt/keyrings/ondrej-php.gpg 2>/dev/null) || true
+            echo "deb [signed-by=/etc/apt/keyrings/ondrej-php.gpg] https://ppa.launchpadcontent.net/ondrej/php/ubuntu ${UBUNTU_CODENAME} main" > /etc/apt/sources.list.d/ondrej-php.list
+        else
+            log_warn "Ondrej PPA has no release for '${UBUNTU_CODENAME}' (HTTP ${PPA_CHECK}). Using native distribution PHP packages."
         fi
-        log_info "Using Ondrej PPA codename: ${UBUNTU_CODENAME}"
-        find /etc/apt/sources.list.d/ -name "*ondrej*" -exec rm -f {} \; 2>/dev/null || true
-        echo "deb [signed-by=/etc/apt/keyrings/ondrej-php.gpg] https://ppa.launchpadcontent.net/ondrej/php/ubuntu ${UBUNTU_CODENAME} main" > /etc/apt/sources.list.d/ondrej-php.list
     elif [ "$OS_ID" = "debian" ]; then
-        mkdir -p /etc/apt/trusted.gpg.d
-        curl -fsSL https://packages.sury.org/php/apt.gpg -o /etc/apt/trusted.gpg.d/php-sury.gpg 2>/dev/null || true
         DEB_CODENAME="${VERSION_CODENAME:-bookworm}"
-        echo "deb [signed-by=/etc/apt/trusted.gpg.d/php-sury.gpg] https://packages.sury.org/php/ ${DEB_CODENAME} main" > /etc/apt/sources.list.d/php.list
+        DEB_CHECK=$(curl -s -o /dev/null -w "%{http_code}" "https://packages.sury.org/php/dists/${DEB_CODENAME}/Release")
+        if [ "$DEB_CHECK" = "200" ]; then
+            mkdir -p /etc/apt/trusted.gpg.d
+            curl -fsSL https://packages.sury.org/php/apt.gpg -o /etc/apt/trusted.gpg.d/php-sury.gpg 2>/dev/null || true
+            echo "deb [signed-by=/etc/apt/trusted.gpg.d/php-sury.gpg] https://packages.sury.org/php/ ${DEB_CODENAME} main" > /etc/apt/sources.list.d/php.list
+        else
+            log_warn "Sury PHP repository has no release for '${DEB_CODENAME}' (HTTP ${DEB_CHECK}). Using native distribution PHP packages."
+            rm -f /etc/apt/sources.list.d/php.list
+        fi
     fi
 
     # Fix Debian/Ubuntu 24.04 mariadb-common update-alternatives and debian-start bug
@@ -446,11 +452,11 @@ EOF
     # Web server packages resolution:
     # On fresh install: Apache HTTP Server is the default web engine.
     # On upgrade: DO NOT install or change web server packages (preserve existing engine untouched).
-    WEB_PACKAGES=(nginx apache2 apache2-utils)
+    WEB_PACKAGES=(apache2 apache2-utils)
     if [ "$INSTALL_MODE" != "upgrade" ]; then
-        log_info "Fresh install: installing Nginx and Apache HTTP Server (Dual Engine Architecture)..."
+        log_info "Fresh install: installing Apache HTTP Server..."
     else
-        log_info "Upgrade mode: ensuring Nginx and Apache packages are present..."
+        log_info "Upgrade mode: ensuring Apache packages are present..."
     fi
 
     apt-get update -y -q 2>/dev/null || apt-get update -y || true
@@ -477,6 +483,9 @@ EOF
         procps \
         "${WEB_PACKAGES[@]}"; then
         log_warn "Fixing dpkg package dependencies and retrying..."
+        find /etc/apt/sources.list.d/ -name "*ondrej*" -exec rm -f {} \; 2>/dev/null || true
+        rm -f /etc/apt/sources.list.d/ondrej-php.list /etc/apt/sources.list.d/php.list
+        apt-get update -y -q 2>/dev/null || apt-get update -y || true
         touch /etc/mysql/mariadb.cnf
         chmod 644 /etc/mysql/mariadb.cnf
         dpkg --configure -a 2>/dev/null || true
@@ -1427,8 +1436,8 @@ if [ "$INSTALL_MODE" != "upgrade" ]; then
     log_info "Fresh install: configuring default Apache HTTP Server..."
     mkdir -p /etc/apache2/sites-available /etc/apache2/sites-enabled /etc/apache2/conf-available
 
-    # 1. Ports Configuration for Apache backend behind Nginx reverse proxy
-    printf '# Managed by dPanel.\n# Apache backend ports behind Nginx reverse proxy\nListen 8080\nListen 8443\n' > /etc/apache2/ports.conf 2>/dev/null || true
+    # 1. Ports Configuration for Apache standalone primary & backend web server
+    printf '# Managed by dPanel.\n# Apache standalone primary & backend web server\nListen 80\nListen 443\nListen 8080\nListen 8443\nListen 888\n' > /etc/apache2/ports.conf 2>/dev/null || true
     echo "ServerName 127.0.0.1" > /etc/apache2/conf-available/servername.conf 2>/dev/null || true
     a2enconf servername 2>/dev/null || true
     cat > /etc/apache2/conf-available/dpanel-remoteip.conf <<'REMIP'
@@ -1438,7 +1447,7 @@ RemoteIPInternalProxy 127.0.0.1 ::1
 SetEnvIf X-Forwarded-Proto "^https$" HTTPS=on
 REMIP
     a2enconf dpanel-remoteip 2>/dev/null || true
-    a2enmod remoteip rewrite ssl proxy proxy_fcgi headers alias mime setenvif 2>/dev/null || true
+    a2enmod remoteip rewrite ssl proxy proxy_http proxy_wstunnel proxy_fcgi headers alias mime setenvif auth_basic authn_file authz_user socache_shmcb 2>/dev/null || true
 
     # 2. Provision Port 888 phpMyAdmin VHost for Apache
     cat > /etc/apache2/sites-available/phpmyadmin.conf <<PMAAPACHE
